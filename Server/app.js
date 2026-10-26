@@ -45,4 +45,20 @@ app.get('/api/health/ready', (req, res) => {
   });
 });
 
+// Application routes
+const authRoutes = require('./src/routes/auth.routes');
+const roomRoutes = require('./src/routes/room.routes');
+const bookingRoutes = require('./src/routes/booking.routes');
+const { notFoundHandler, errorHandler } = require('./src/middleware/error.middleware');
+
+app.use('/api/auth', authRoutes);
+app.use('/api/rooms', roomRoutes);
+app.use('/api/bookings', bookingRoutes);
+
+// 404 catch-all handler for unknown endpoints
+app.use(notFoundHandler);
+
+// Central JSON error handler
+app.use(errorHandler);
+
 module.exports = app;
