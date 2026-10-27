@@ -180,6 +180,14 @@ To prevent privilege escalation vulnerabilities, public registration cannot crea
   * Serializes concurrent attempts targeting the *same* physical room; concurrent requests targeting *different* rooms execute in parallel.
   * Under the lock, queries for overlapping active bookings (`confirmed`, `checked_in`, `pending`). If found, rejects with `409 Conflict`.
   * Lock is reliably released via `finally` blocks, and orphaned locks are automatically reclaimed after a timeout.
+* **Booking-Hold Expiration Policy & Background Sweeper**:
+  * New reservations in `pending` status receive a 15-minute reservation hold deadline (`holdExpiresAt = createdAt + 15m`).
+  * A background expiration worker runs every 30 seconds, scanning batches of up to 50 pending reservations that have passed their deadline.
+  * Expired pending bookings are atomically transitioned to `status: 'cancelled'`, immediately releasing room dates for new reservations.
+  * Repeated checkout requests do not extend the 15-minute hold. Initiating checkout on an expired hold is rejected with `400 Bad Request`.
+  * Post-intent validation ensures that if a hold expires or a booking is cancelled while an external payment provider call is in flight, checkout is aborted, the external intent is safely cancelled (or marked for reconciliation if cancellation fails), and no pending payment session or client secret is returned.
+  * If a payment succeeds after a booking has already expired and been cancelled, the booking remains cancelled and the payment records reconciliation metadata (`requiresRefund: true`).
+  * Automatic refund execution is not implemented in this stage and is reserved for Stage 6.5.
 
 ### `GET /api/bookings/my`
 * **Access**: Protected (Authenticated Customer)
@@ -222,4 +230,60 @@ Run the complete backend test suite:
 npm test
 ```
 All tests run against isolated ephemeral databases or schema validators, leaving the main `hotelpro` database completely untouched.
+
+---
+
+## 7. Payment Processing, Webhooks, Refunds & Reconciliation
+
+HotelPro implements an enterprise-grade, PCI-compliant payment lifecycle built on a provider abstraction pattern.
+
+### 7.1 Payment Provider Abstraction
+The payment architecture decouples business logic from gateway SDKs using `PaymentProvider` (`src/services/payment/provider.interface.js`):
+* **`MockPaymentProvider`**: Deterministic in-memory provider for offline local development and test automation. Supports simulation flags (`shouldFail`, `delayMs`, `beforeComplete`, `mockId`).
+* **`StripePaymentProvider`**: Production-ready Stripe integration using Stripe SDK (`stripe`). Isolates intent creation, signature verification, cancellations, and refunds.
+
+### 7.2 Checkout Initiation
+* **Endpoint**: `POST /api/payments/checkout-session`
+* **Access**: Protected (Authenticated Customer)
+* **Concurrency Protection**: Per-booking distributed lock (`withCheckoutLock`) backed by `SystemLock` prevents duplicate checkout sessions.
+* **Active Session Deduplication**: If an active `pending` payment session already exists for the booking, it is reused rather than creating a new intent.
+* **Post-Intent Fencing Revalidation**: Revalidates booking status after external provider network calls. If the reservation expired or was cancelled while in flight, the external intent is cancelled and no client secret is exposed.
+
+### 7.3 Webhook Verification & Idempotency
+* **Endpoints**: `POST /api/payments/webhook`, `POST /api/payments/webhook/:provider`
+* **Access**: Public (Cryptographically authenticated via gateway signature)
+* **Raw Body Preservation**: Preserves raw body bytes (`req.rawBody`) during JSON parsing for byte-level cryptographic signature verification (`stripe.webhooks.constructEvent`).
+* **Durable Idempotency**: Tracked in `WebhookEvent` model with unique compound index `{ provider: 1, eventId: 1 }`.
+* **Atomic Lease Recovery**: Uses `lockToken` UUIDs and `lockedAt` timestamps. Stale in-flight events (>15s) are reclaimed atomically, while concurrent fresh events receive `409 Conflict` to allow gateway retries without duplicate side effects.
+* **Late Payment Reconciliation**: If a successful payment arrives for an expired or cancelled booking, the booking is **never** reconfirmed; the payment is flagged with `metadata.requiresRefund = 'true'` and `reconciliationStatus = 'refund_eligible'`.
+
+### 7.4 Refund Lifecycle
+* **Endpoint**: `POST /api/payments/:id/refund`
+* **Access**: Protected (Booking Owner or Administrator)
+* **Payload**:
+  ```json
+  {
+    "amount": 100.50,
+    "reason": "Customer requested partial refund",
+    "idempotencyKey": "refund_req_xyz123"
+  }
+  ```
+* **Safety & Guarantees**:
+  * Only `completed` or `partially_refunded` payments can be refunded.
+  * Defaults to full remaining refundable balance (`amount - totalRefunded`) if `amount` is omitted.
+  * Strictly validates that cumulative refunds never exceed original captured payment amount.
+  * Updates status to `partially_refunded` or `refunded` only upon verified provider confirmation.
+  * Stores complete refund history and idempotency keys in `Payment.refunds`.
+
+### 7.5 Reconciliation Administration
+* **Endpoint**: `GET /api/payments/reconciliation`
+* **Access**: Protected (`Admin` only)
+* **Purpose**: Inspects payments with reconciliation flags (`requiresRefund = 'true'`, intent cancellation anomalies, or refund failures).
+
+### 7.6 Policy-Neutral Foundation & Unresolved Business Decisions
+To avoid unauthorized financial assumptions, the system implements a policy-neutral technical foundation:
+* **Cancellation Cutoff**: No arbitrary cutoff window is hardcoded.
+* **Refund Percentages / Fees**: Full refundable amount is available until an explicit business policy (e.g. tier-based refund penalties) is approved.
+* **Automatic vs. Explicit Refunds**: Booking cancellation flags payments for refund reconciliation (`refund_eligible`) rather than executing silent financial movement without explicit authorization.
+
 

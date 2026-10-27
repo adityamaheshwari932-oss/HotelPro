@@ -4,6 +4,7 @@ const Room = require('./room.model');
 const Booking = require('./booking.model');
 const Payment = require('./payment.model');
 const SystemLock = require('./systemLock.model');
+const WebhookEvent = require('./webhookEvent.model');
 
 module.exports = {
   Hotel,
@@ -11,5 +12,6 @@ module.exports = {
   Room,
   Booking,
   Payment,
-  SystemLock
+  SystemLock,
+  WebhookEvent
 };

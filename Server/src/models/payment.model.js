@@ -117,6 +117,46 @@ const paymentSchema = new mongoose.Schema(
         type: Date
       }
     },
+    refunds: [
+      {
+        refundTransactionId: {
+          type: String,
+          trim: true,
+          default: ''
+        },
+        amount: {
+          type: Number,
+          required: true,
+          min: [0, 'Refund amount cannot be negative']
+        },
+        status: {
+          type: String,
+          enum: ['pending', 'completed', 'failed'],
+          default: 'pending'
+        },
+        reason: {
+          type: String,
+          trim: true,
+          default: ''
+        },
+        idempotencyKey: {
+          type: String,
+          trim: true
+        },
+        requestedAt: {
+          type: Date,
+          default: Date.now
+        },
+        completedAt: {
+          type: Date
+        },
+        errorMessage: {
+          type: String,
+          trim: true,
+          default: ''
+        }
+      }
+    ],
     metadata: {
       type: Map,
       of: String,
@@ -185,6 +225,18 @@ paymentSchema.pre('validate', function () {
 
 // Note: indexes for booking and status are declared directly on their fields via index: true
 paymentSchema.index({ transactionId: 1 }, { sparse: true });
+paymentSchema.index({ 'refunds.idempotencyKey': 1 }, { sparse: true });
+paymentSchema.index({ 'metadata.requiresRefund': 1 }, { sparse: true });
+
+// Database-level concurrency safeguard: guarantees at most one pending payment per booking
+paymentSchema.index(
+  { booking: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { status: 'pending' },
+    name: 'unique_pending_booking_payment'
+  }
+);
 
 const Payment = mongoose.model('Payment', paymentSchema);
 

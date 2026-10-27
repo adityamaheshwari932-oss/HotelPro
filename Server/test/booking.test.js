@@ -776,6 +776,240 @@ describe('Stage 5: Booking Management, Reservation Lifecycle & Double-Booking Pr
       const remainingLock = await SystemLock.findById(lockKey);
       assert.strictEqual(remainingLock, null);
     });
+
+    test('ownership-safe cleanup: obsolete lock owner cannot release a subsequent owner lock', async () => {
+      const lockKey = `room_lock_${activeRoom._id}`;
+
+      // Simulate Owner A acquiring lock with tokenA
+      const tokenA = 'token-owner-a-1111';
+      await SystemLock.create({
+        _id: lockKey,
+        initializedAt: new Date(Date.now() - 20000), // stale
+        meta: { roomId: activeRoom._id.toString(), lockToken: tokenA, acquiredAt: Date.now() - 20000 }
+      });
+
+      // Owner B reclaims lock with tokenB
+      const tokenB = 'token-owner-b-2222';
+      await SystemLock.findOneAndDelete({ _id: lockKey });
+      await SystemLock.create({
+        _id: lockKey,
+        initializedAt: new Date(),
+        meta: { roomId: activeRoom._id.toString(), lockToken: tokenB, acquiredAt: Date.now() }
+      });
+
+      // Owner A finishes delayed execution and calls releaseRoomLock with tokenA
+      const releasedByA = await releaseRoomLock(activeRoom._id, tokenA);
+      assert.strictEqual(releasedByA, false, 'Release with obsolete tokenA must return false');
+
+      // Verify Owner B's lock is STILL intact in MongoDB
+      const currentLock = await SystemLock.findById(lockKey);
+      assert.ok(currentLock, 'Owner B lock must remain in database');
+      assert.strictEqual(currentLock.meta.lockToken, tokenB, 'Owner B token must be preserved');
+
+      // Owner B releases with valid tokenB
+      const releasedByB = await releaseRoomLock(activeRoom._id, tokenB);
+      assert.strictEqual(releasedByB, true, 'Release with valid tokenB must return true');
+
+      // Lock is now deleted
+      const finalLock = await SystemLock.findById(lockKey);
+      assert.strictEqual(finalLock, null);
+    });
+
+    test('stale-lock recovery while earlier owner is delayed: fencing check prevents obsolete commit', async () => {
+      // Setup room for this test
+      const testRoom = await Room.create({
+        hotel: activeHotel._id,
+        roomNumber: 'FENCE-101',
+        roomType: 'double',
+        basePrice: 120,
+        capacity: 2,
+        status: 'active'
+      });
+
+      // Simulate Owner A holding an obsolete lock token that was reclaimed by Owner B
+      const tokenA = 'obsolete-token-a';
+      const lockKey = `room_lock_${testRoom._id}`;
+
+      // Owner B has acquired the active lock
+      await SystemLock.create({
+        _id: lockKey,
+        initializedAt: new Date(),
+        meta: { roomId: testRoom._id.toString(), lockToken: 'active-token-b', acquiredAt: Date.now() }
+      });
+
+      // Owner B creates a booking for Feb 10 - Feb 14
+      await Booking.create({
+        hotel: activeHotel._id,
+        room: testRoom._id,
+        user: customerB._id,
+        checkInDate: new Date('2027-02-10T00:00:00.000Z'),
+        checkOutDate: new Date('2027-02-14T00:00:00.000Z'),
+        guestInfo: { name: 'Bob Voyager', email: 'bob@hotelpro.com' },
+        guestCount: 1,
+        priceSnapshot: {
+          baseNightlyRate: 120,
+          nightlyBreakdown: [
+            { date: '2027-02-10', rate: 120 },
+            { date: '2027-02-11', rate: 120 },
+            { date: '2027-02-12', rate: 120 },
+            { date: '2027-02-13', rate: 120 }
+          ],
+          totalRoomRate: 480,
+          taxes: 0,
+          fees: 0
+        },
+        totalAmount: 480,
+        currency: 'USD',
+        status: 'pending'
+      });
+
+      // Owner B releases lock
+      await releaseRoomLock(testRoom._id, 'active-token-b');
+
+      // Now Owner A (delayed/stale) attempts to commit an overlapping stay (Feb 12 - Feb 16)
+      // When Owner A invokes createBooking via API, it must re-acquire lock and find the overlap
+      const resA = await fetch(`${baseUrl}/api/bookings`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${customerAToken}`
+        },
+        body: JSON.stringify({
+          room: testRoom._id.toString(),
+          checkInDate: '2027-02-12',
+          checkOutDate: '2027-02-16',
+          guestCount: 1
+        })
+      });
+
+      // Must be rejected with 409 Conflict
+      assert.strictEqual(resA.status, 409);
+      const bodyA = await resA.json();
+      assert.match(bodyA.message, /no longer available/i);
+
+      // Verify only 1 booking exists in that period
+      const activeBookings = await Booking.countDocuments({
+        room: testRoom._id,
+        status: { $in: ['pending', 'confirmed'] }
+      });
+      assert.strictEqual(activeBookings, 1);
+    });
+
+    test('concurrent non-overlapping requests for the same room both succeed under serialization', async () => {
+      // Room: secondaryRoom
+      // Request 1: 2027-07-01 to 2027-07-04
+      // Request 2: 2027-07-04 to 2027-07-07 (same-day checkout/checkin)
+      const payload1 = {
+        room: secondaryRoom._id.toString(),
+        checkInDate: '2027-07-01',
+        checkOutDate: '2027-07-04',
+        guestCount: 2
+      };
+
+      const payload2 = {
+        room: secondaryRoom._id.toString(),
+        checkInDate: '2027-07-04',
+        checkOutDate: '2027-07-07',
+        guestCount: 2
+      };
+
+      const [res1, res2] = await Promise.all([
+        fetch(`${baseUrl}/api/bookings`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${customerAToken}`
+          },
+          body: JSON.stringify(payload1)
+        }),
+        fetch(`${baseUrl}/api/bookings`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${customerBToken}`
+          },
+          body: JSON.stringify(payload2)
+        })
+      ]);
+
+      // Both non-overlapping stays must succeed (201)
+      assert.strictEqual(res1.status, 201, 'Request 1 should succeed');
+      assert.strictEqual(res2.status, 201, 'Request 2 should succeed');
+
+      const body1 = await res1.json();
+      const body2 = await res2.json();
+      assert.strictEqual(body1.success, true);
+      assert.strictEqual(body2.success, true);
+    });
+
+    test('database-enforced invariant: WiredTiger rejects overlapping active booking insertion directly', async () => {
+      // Even if an application bug bypassed application locking completely,
+      // the partial unique index on (room, nightlyBreakdown.date) physically blocks double bookings at the DB engine level.
+      const invariantRoom = await Room.create({
+        hotel: activeHotel._id,
+        roomNumber: 'INVAR-101',
+        roomType: 'suite',
+        basePrice: 250,
+        capacity: 4,
+        status: 'active'
+      });
+
+      // Direct DB insert 1: Nov 10 & Nov 11
+      await Booking.create({
+        hotel: activeHotel._id,
+        room: invariantRoom._id,
+        user: customerA._id,
+        checkInDate: new Date('2027-11-10T00:00:00.000Z'),
+        checkOutDate: new Date('2027-11-12T00:00:00.000Z'),
+        guestInfo: { name: 'Direct Guest A', email: 'a@example.com' },
+        guestCount: 2,
+        priceSnapshot: {
+          baseNightlyRate: 250,
+          nightlyBreakdown: [
+            { date: '2027-11-10', rate: 250 },
+            { date: '2027-11-11', rate: 250 }
+          ],
+          totalRoomRate: 500,
+          taxes: 0,
+          fees: 0
+        },
+        totalAmount: 500,
+        currency: 'USD',
+        status: 'pending'
+      });
+
+      // Direct DB insert 2: Nov 11 & Nov 12 (overlaps on Nov 11)
+      let duplicateError = null;
+      try {
+        await Booking.create({
+          hotel: activeHotel._id,
+          room: invariantRoom._id,
+          user: customerB._id,
+          checkInDate: new Date('2027-11-11T00:00:00.000Z'),
+          checkOutDate: new Date('2027-11-13T00:00:00.000Z'),
+          guestInfo: { name: 'Direct Guest B', email: 'b@example.com' },
+          guestCount: 2,
+          priceSnapshot: {
+            baseNightlyRate: 250,
+            nightlyBreakdown: [
+              { date: '2027-11-11', rate: 250 },
+              { date: '2027-11-12', rate: 250 }
+            ],
+            totalRoomRate: 500,
+            taxes: 0,
+            fees: 0
+          },
+          totalAmount: 500,
+          currency: 'USD',
+          status: 'confirmed'
+        });
+      } catch (err) {
+        duplicateError = err;
+      }
+
+      assert.ok(duplicateError, 'Direct overlapping insert must be rejected by MongoDB');
+      assert.strictEqual(duplicateError.code, 11000, 'Must be E11000 duplicate key error');
+    });
   });
 
   // ==========================================

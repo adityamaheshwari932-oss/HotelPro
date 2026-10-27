@@ -11,8 +11,16 @@ app.use(cors({
   credentials: true
 }));
 
-// Request body parsing middleware
-app.use(express.json());
+// Request body parsing middleware with raw-body preservation for cryptographic signature verification
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      if (buf && buf.length) {
+        req.rawBody = buf;
+      }
+    }
+  })
+);
 
 // Basic liveness health check endpoint
 app.get('/api/health', (req, res) => {
@@ -49,11 +57,13 @@ app.get('/api/health/ready', (req, res) => {
 const authRoutes = require('./src/routes/auth.routes');
 const roomRoutes = require('./src/routes/room.routes');
 const bookingRoutes = require('./src/routes/booking.routes');
+const paymentRoutes = require('./src/routes/payment.routes');
 const { notFoundHandler, errorHandler } = require('./src/middleware/error.middleware');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/bookings', bookingRoutes);
+app.use('/api/payments', paymentRoutes);
 
 // 404 catch-all handler for unknown endpoints
 app.use(notFoundHandler);

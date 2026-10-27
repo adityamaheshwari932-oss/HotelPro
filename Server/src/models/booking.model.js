@@ -161,6 +161,10 @@ const bookingSchema = new mongoose.Schema(
       required: true,
       index: true
     },
+    holdExpiresAt: {
+      type: Date,
+      index: true
+    },
     cancellation: {
       cancelledAt: {
         type: Date
@@ -181,6 +185,18 @@ const bookingSchema = new mongoose.Schema(
 bookingSchema.index({ room: 1, checkInDate: 1, checkOutDate: 1 });
 bookingSchema.index({ user: 1, createdAt: -1 });
 bookingSchema.index({ hotel: 1, status: 1 });
+
+// Database-enforced invariant: Prevents overlapping active reservations for the same room on any stay night
+bookingSchema.index(
+  { room: 1, 'priceSnapshot.nightlyBreakdown.date': 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      status: { $in: ['pending', 'confirmed', 'checked_in'] },
+      'priceSnapshot.nightlyBreakdown.0': { $exists: true }
+    }
+  }
+);
 
 const Booking = mongoose.model('Booking', bookingSchema);
 

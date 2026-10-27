@@ -1,4 +1,4 @@
-const { Booking, Room, Hotel } = require('../models');
+const { Booking, Room, Hotel, Payment } = require('../models');
 const { calculateStayPrice } = require('./pricing.service');
 const { withRoomLock } = require('../utils/roomLock');
 const { AppError } = require('../middleware/error.middleware');
@@ -24,6 +24,48 @@ const ALLOWED_STATUS_TRANSITIONS = {
   checked_in: ['checked_out'],
   checked_out: [],
   cancelled: []
+};
+
+const HOLD_DURATION_MS = 15 * 60 * 1000; // 15 minutes in milliseconds
+
+/**
+ * Evaluates whether a booking's reservation hold deadline has expired.
+ *
+ * Rules:
+ * - If holdExpiresAt is set (Date): expired if now >= holdExpiresAt.
+ * - If holdExpiresAt is explicitly null: does not expire arbitrarily (returns false).
+ * - If holdExpiresAt is genuinely absent (undefined): falls back to legacy deadline createdAt + 15m.
+ * - If createdAt is missing or invalid: does not expire arbitrarily (returns false).
+ *
+ * @param {object} booking - Booking document or plain object
+ * @param {Date} [now=new Date()] - Evaluation time
+ * @returns {boolean}
+ */
+const isBookingHoldExpired = (booking, now = new Date()) => {
+  if (!booking) return false;
+  const evalMs = (now instanceof Date && !isNaN(now.getTime())) ? now.getTime() : Date.now();
+
+  if (booking.holdExpiresAt !== undefined) {
+    if (booking.holdExpiresAt === null) {
+      return false;
+    }
+    const holdMs = new Date(booking.holdExpiresAt).getTime();
+    if (!isNaN(holdMs)) {
+      return evalMs >= holdMs;
+    }
+    return false;
+  }
+
+  // Legacy fallback: holdExpiresAt is undefined
+  if (booking.createdAt) {
+    const createdMs = new Date(booking.createdAt).getTime();
+    if (!isNaN(createdMs)) {
+      const legacyDeadlineMs = createdMs + HOLD_DURATION_MS;
+      return evalMs >= legacyDeadlineMs;
+    }
+  }
+
+  return false;
 };
 
 /**
@@ -64,7 +106,7 @@ const createBooking = async (bookingData, authenticatedUser) => {
   const parsedGuestCount = parseInt(guestCount, 10);
 
   // Execute critical reservation path within atomic per-room distributed lock
-  return await withRoomLock(roomId, async () => {
+  return await withRoomLock(roomId, async ({ assertLockHeld } = {}) => {
     // 1. Fetch Room and populate Hotel
     const room = await Room.findById(roomId).populate('hotel');
     if (!room) {
@@ -142,20 +184,40 @@ const createBooking = async (bookingData, authenticatedUser) => {
       throw new AppError('Please provide a valid guest email address', 400);
     }
 
-    // 10. Persist booking. Authenticated user ID is strictly enforced from req.user._id
-    const newBooking = await Booking.create({
-      hotel: room.hotel._id,
-      room: room._id,
-      user: authenticatedUser._id,
-      checkInDate: requestedCheckIn,
-      checkOutDate: requestedCheckOut,
-      guestInfo: normalizedGuestInfo,
-      guestCount: parsedGuestCount,
-      priceSnapshot,
-      totalAmount: pricing.totalRoomPrice,
-      currency: pricing.currency || 'USD',
-      status: 'pending'
-    });
+    // 10. Fencing verification: confirm this request still owns the active lock token before writing
+    if (typeof assertLockHeld === 'function') {
+      await assertLockHeld();
+    }
+
+    // 11. Persist booking under database-enforced unique invariant
+    // Calculate hold expiration deadline (15 minutes from creation)
+    const holdExpiresAt = new Date(Date.now() + HOLD_DURATION_MS);
+
+    let newBooking;
+    try {
+      newBooking = await Booking.create({
+        hotel: room.hotel._id,
+        room: room._id,
+        user: authenticatedUser._id,
+        checkInDate: requestedCheckIn,
+        checkOutDate: requestedCheckOut,
+        guestInfo: normalizedGuestInfo,
+        guestCount: parsedGuestCount,
+        priceSnapshot,
+        totalAmount: pricing.totalRoomPrice,
+        currency: pricing.currency || 'USD',
+        status: 'pending',
+        holdExpiresAt
+      });
+    } catch (err) {
+      if (err.code === 11000) {
+        throw new AppError(
+          'The requested room is no longer available for the selected dates.',
+          409
+        );
+      }
+      throw err;
+    }
 
     return await Booking.findById(newBooking._id)
       .select('-__v')
@@ -294,6 +356,27 @@ const cancelBooking = async (bookingId, requestingUser, reason = '') => {
 
   await booking.save();
 
+  // Reconcile associated payment if completed
+  try {
+    const completedPayment = await Payment.findOne({
+      booking: booking._id,
+      status: 'completed'
+    });
+    if (completedPayment) {
+      completedPayment.metadata.set('requiresRefund', 'true');
+      completedPayment.metadata.set('reconciliationStatus', 'refund_eligible');
+      completedPayment.metadata.set(
+        'reconciliationReason',
+        `Booking cancelled by ${isAdmin ? 'administrator' : 'customer'} after payment completion`
+      );
+      await completedPayment.save();
+    }
+  } catch (payErr) {
+    console.error(
+      `[BookingService] Error updating reconciliation on payment for cancelled booking ${booking._id}: ${payErr.message}`
+    );
+  }
+
   return await Booking.findById(booking._id)
     .select('-__v')
     .populate('room', 'roomNumber roomType basePrice')
@@ -406,8 +489,91 @@ const updateBookingStatus = async (bookingId, newStatus, reason = '', adminUser)
     .populate('user', 'name email role');
 };
 
+/**
+ * Scans and expires pending booking holds that have passed their 15-minute deadline.
+ *
+ * Atomically transitions qualifying pending bookings to 'cancelled' status using conditional updates.
+ * Safe for standalone MongoDB and concurrent execution across multiple worker sweeps.
+ *
+ * @param {object} [options]
+ * @param {number} [options.batchSize=50] - Maximum candidates to sweep (capped at 50)
+ * @param {Date} [options.now=new Date()] - Evaluation timestamp
+ * @returns {Promise<{ scanned: number, expired: number, skipped: number, failed: number }>}
+ */
+const expireBookingHolds = async ({ batchSize = 50, now = new Date() } = {}) => {
+  const parsedBatchSize = parseInt(batchSize, 10);
+  const effectiveBatchSize = (!isNaN(parsedBatchSize) && parsedBatchSize > 0)
+    ? Math.min(parsedBatchSize, 50)
+    : 50;
+
+  const evaluationTime = (now instanceof Date && !isNaN(now.getTime())) ? now : new Date();
+  const legacyThreshold = new Date(evaluationTime.getTime() - HOLD_DURATION_MS);
+
+  // Candidate selection query
+  const candidateFilter = {
+    status: 'pending',
+    $or: [
+      { holdExpiresAt: { $type: 'date', $lte: evaluationTime } },
+      {
+        holdExpiresAt: { $exists: false },
+        createdAt: { $type: 'date', $lte: legacyThreshold }
+      }
+    ]
+  };
+
+  const candidates = await Booking.find(candidateFilter)
+    .limit(effectiveBatchSize)
+    .select('_id holdExpiresAt createdAt status')
+    .lean();
+
+  let scanned = candidates.length;
+  let expired = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const candidate of candidates) {
+    try {
+      const updated = await Booking.findOneAndUpdate(
+        {
+          _id: candidate._id,
+          status: 'pending',
+          $or: [
+            { holdExpiresAt: { $type: 'date', $lte: evaluationTime } },
+            {
+              holdExpiresAt: { $exists: false },
+              createdAt: { $type: 'date', $lte: legacyThreshold }
+            }
+          ]
+        },
+        {
+          $set: {
+            status: 'cancelled',
+            'cancellation.cancelledAt': evaluationTime,
+            'cancellation.reason': 'Reservation hold expired (15-minute timeout)'
+          }
+        },
+        { returnDocument: 'after' }
+      );
+
+      if (updated) {
+        expired += 1;
+      } else {
+        skipped += 1;
+      }
+    } catch (err) {
+      failed += 1;
+      console.error(`[BookingHoldWorker] Failed to expire booking hold for ID ${candidate._id}: ${err.message}`);
+    }
+  }
+
+  return { scanned, expired, skipped, failed };
+};
+
 module.exports = {
+  HOLD_DURATION_MS,
   ALLOWED_STATUS_TRANSITIONS,
+  isBookingHoldExpired,
+  expireBookingHolds,
   createBooking,
   getMyBookings,
   getBookingById,

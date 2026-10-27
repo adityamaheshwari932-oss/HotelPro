@@ -4,6 +4,7 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const app = require('./app');
 const connectDB = require('./src/config/db');
+const { startHoldExpirationWorker, stopHoldExpirationWorker } = require('./src/workers/bookingHold.worker');
 
 const PORT = process.env.PORT || 5000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -28,6 +29,13 @@ const gracefulShutdown = async (signal) => {
   }, 10000);
 
   try {
+    try {
+      stopHoldExpirationWorker();
+      console.log('[HotelPro Server] Booking hold expiration worker stopped.');
+    } catch (workerErr) {
+      console.error(`[HotelPro Server] Error stopping booking hold worker: ${workerErr.message}`);
+    }
+
     if (server) {
       await new Promise((resolve, reject) => {
         server.close((err) => {
@@ -75,6 +83,14 @@ const startServer = async () => {
       console.error(`[HotelPro Server] Server network error: ${err.message}`);
       process.exit(1);
     });
+
+    // Start background booking hold expiration worker (30s interval)
+    try {
+      startHoldExpirationWorker();
+      console.log('[HotelPro Server] Booking hold expiration worker started (30s interval).');
+    } catch (workerErr) {
+      console.error(`[HotelPro Server] Failed to start booking hold worker: ${workerErr.message}`);
+    }
 
     return server;
   } catch (error) {
