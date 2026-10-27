@@ -13,6 +13,7 @@ let idCounter = 1000;
 class MockPaymentProvider extends PaymentProvider {
   constructor() {
     super('mock');
+    this._idempotencyStore = new Map();
   }
 
   /**
@@ -31,10 +32,13 @@ class MockPaymentProvider extends PaymentProvider {
   }
 
   /**
-   * Resets internal counter (useful for test isolation).
+   * Resets internal counter and idempotency cache (useful for test isolation).
    */
   resetCounter(start = 1000) {
     idCounter = start;
+    if (this._idempotencyStore) {
+      this._idempotencyStore.clear();
+    }
   }
 
   /**
@@ -292,6 +296,19 @@ class MockPaymentProvider extends PaymentProvider {
 
     const sim = params.simulation || {};
 
+    // Simulate provider network timeout or ambiguous error
+    if (sim.timeout === true) {
+      throw new Error('Payment gateway connection timeout (ETIMEDOUT)');
+    }
+
+    // Support provider-level idempotency deduplication
+    if (params.idempotencyKey) {
+      const cached = this._idempotencyStore.get(String(params.idempotencyKey));
+      if (cached) {
+        return { ...cached, idempotent: true };
+      }
+    }
+
     // Simulate refund failure if requested
     if (sim.shouldFail === true) {
       const failedRefId = this._generateIdentifier('mock_ref_failed', sim.mockId);
@@ -316,7 +333,7 @@ class MockPaymentProvider extends PaymentProvider {
     const refId = this._generateIdentifier('mock_ref', sim.mockId);
     const isFullRefund = params.amount === params.originalAmount;
 
-    return {
+    const result = {
       success: true,
       provider: 'mock',
       refundTransactionId: refId,
@@ -331,6 +348,12 @@ class MockPaymentProvider extends PaymentProvider {
         notice: 'Simulated refund succeeded - No real financial transaction occurred'
       }
     };
+
+    if (params.idempotencyKey) {
+      this._idempotencyStore.set(String(params.idempotencyKey), result);
+    }
+
+    return result;
   }
 
   /**

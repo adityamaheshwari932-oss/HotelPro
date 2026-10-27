@@ -38,6 +38,22 @@ export const Navbar = () => {
           {isAuthenticated ? (
             <>
               <NavLink
+                to="/my-bookings"
+                className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+              >
+                My Bookings
+              </NavLink>
+
+              {user?.role === 'admin' && (
+                <NavLink
+                  to="/admin/bookings"
+                  className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
+                >
+                  Admin Bookings
+                </NavLink>
+              )}
+
+              <NavLink
                 to="/profile"
                 className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}
               >

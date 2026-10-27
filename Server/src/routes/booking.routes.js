@@ -18,6 +18,9 @@ router.get('/my', protect, bookingController.getMyBookings);
 // Retrieve a single booking (Owner or Admin)
 router.get('/:id', protect, bookingController.getBookingById);
 
+// Retrieve latest payment attempt for a booking (Owner or Admin)
+router.get('/:id/payment', protect, bookingController.getBookingPayment);
+
 // Request booking cancellation (Owner or Admin)
 router.patch('/:id/cancel', protect, bookingController.cancelBooking);
 

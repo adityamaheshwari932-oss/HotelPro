@@ -96,8 +96,70 @@ const validateRefundInput = (payload = {}) => {
   };
 };
 
+const ALLOWED_SIMULATION_OUTCOMES = ['success', 'failure'];
+
+/**
+ * Validates the mock simulation request payload.
+ *
+ * @param {object} payload
+ * @returns {{ outcome: 'success' | 'failure', failureReason?: string }}
+ */
+const validateMockSimulationInput = (payload = {}) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new AppError('Simulation payload must be an object', 400);
+  }
+
+  // Intercept and reject any raw card credentials immediately (PCI Guardrail)
+  assertNoForbiddenCredentials(payload);
+
+  const rawOutcome = payload.outcome !== undefined ? payload.outcome : payload.status;
+  if (!rawOutcome || typeof rawOutcome !== 'string') {
+    throw new AppError(
+      `Simulation outcome is required. Allowed values: ${ALLOWED_SIMULATION_OUTCOMES.join(', ')}`,
+      400
+    );
+  }
+
+  const normalized = rawOutcome.trim().toLowerCase();
+  let outcome;
+  if (normalized === 'success' || normalized === 'succeeded') {
+    outcome = 'success';
+  } else if (normalized === 'failure' || normalized === 'failed') {
+    outcome = 'failure';
+  } else {
+    throw new AppError(
+      `Invalid simulation outcome "${rawOutcome}". Allowed values: ${ALLOWED_SIMULATION_OUTCOMES.join(', ')}`,
+      400
+    );
+  }
+
+  let failureReason = undefined;
+  const rawReason = payload.failureReason || payload.reason;
+  if (rawReason !== undefined && rawReason !== null) {
+    if (typeof rawReason !== 'string') {
+      throw new AppError('Simulation failure reason must be a string', 400);
+    }
+    const trimmed = rawReason.trim();
+    if (trimmed.length > 500) {
+      throw new AppError('Simulation failure reason cannot exceed 500 characters', 400);
+    }
+    failureReason = trimmed || undefined;
+  }
+
+  if (outcome === 'failure' && !failureReason) {
+    failureReason = 'Simulated card decline: insufficient funds';
+  }
+
+  return {
+    outcome,
+    failureReason
+  };
+};
+
 module.exports = {
   validateCheckoutSessionInput,
   validateRefundInput,
-  ALLOWED_PROVIDERS
+  validateMockSimulationInput,
+  ALLOWED_PROVIDERS,
+  ALLOWED_SIMULATION_OUTCOMES
 };

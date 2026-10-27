@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context';
 import { ApiError } from '../api/client';
@@ -17,11 +17,20 @@ export const LoginPage = () => {
   const [apiError, setApiError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // If already authenticated, redirect immediately
-  const from = location.state?.from?.pathname || '/';
-  if (isAuthenticated && !isSubmitting) {
-    navigate(from, { replace: true });
-  }
+  // Preserve complete return destination including query parameters
+  const fromState = location.state?.from;
+  const from = fromState
+    ? (typeof fromState === 'string'
+        ? fromState
+        : `${fromState.pathname || '/'}${fromState.search || ''}`)
+    : '/';
+
+  // If already authenticated, redirect to destination
+  useEffect(() => {
+    if (isAuthenticated && !isSubmitting) {
+      navigate(from, { replace: true });
+    }
+  }, [isAuthenticated, isSubmitting, from, navigate]);
 
   const validate = () => {
     const errors = {};

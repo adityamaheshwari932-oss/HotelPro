@@ -1,7 +1,9 @@
+const mongoose = require('mongoose');
 const { Booking, Room, Hotel, Payment } = require('../models');
 const { calculateStayPrice } = require('./pricing.service');
 const { withRoomLock } = require('../utils/roomLock');
 const { AppError } = require('../middleware/error.middleware');
+
 const {
   validateBookingCreation,
   validateBookingStatusUpdate,
@@ -239,6 +241,32 @@ const getMyBookings = async (userId, query = {}) => {
   const { page, limit, skip } = parsePagination(query);
 
   const filter = { user: userId };
+  const now = new Date();
+
+  // Support timeFilter (upcoming, active, past, cancelled, all)
+  if (query.timeFilter) {
+    const tf = String(query.timeFilter).toLowerCase().trim();
+    if (tf === 'upcoming') {
+      filter.status = { $ne: 'cancelled' };
+      filter.checkInDate = { $gt: now };
+    } else if (tf === 'active') {
+      filter.status = { $in: ['confirmed', 'checked_in'] };
+      filter.checkInDate = { $lte: now };
+      filter.checkOutDate = { $gt: now };
+    } else if (tf === 'past') {
+      filter.status = { $ne: 'cancelled' };
+      filter.checkOutDate = { $lte: now };
+    } else if (tf === 'cancelled') {
+      filter.status = 'cancelled';
+    } else if (tf === 'all') {
+      // No additional filter
+    } else {
+      throw new AppError(
+        'Invalid timeFilter. Allowed values: all, upcoming, active, past, cancelled',
+        400
+      );
+    }
+  }
 
   if (query.status) {
     if (!VALID_BOOKING_STATUSES.includes(query.status)) {
@@ -262,8 +290,36 @@ const getMyBookings = async (userId, query = {}) => {
     Booking.countDocuments(filter)
   ]);
 
+  // Batch-populate associated payments for efficiency (avoids N+1 client API requests)
+  const bookingIds = bookings.map((b) => b._id);
+  const payments = bookingIds.length
+    ? await Payment.find({ booking: { $in: bookingIds } })
+        .select('_id booking amount currency status provider transactionId paymentMethod refund createdAt')
+        .sort({ createdAt: -1 })
+        .lean()
+    : [];
+
+  const isSettledStatus = (status) => ['completed', 'partially_refunded', 'refunded'].includes(status);
+  const paymentMap = new Map();
+  for (const p of payments) {
+    const bId = p.booking.toString();
+    if (!paymentMap.has(bId)) {
+      paymentMap.set(bId, p);
+    } else {
+      const existing = paymentMap.get(bId);
+      if (!isSettledStatus(existing.status) && isSettledStatus(p.status)) {
+        paymentMap.set(bId, p);
+      }
+    }
+  }
+
+  const enrichedBookings = bookings.map((b) => ({
+    ...b,
+    payment: paymentMap.get(b._id.toString()) || null
+  }));
+
   return {
-    bookings,
+    bookings: enrichedBookings,
     pagination: {
       total,
       page,
@@ -272,6 +328,7 @@ const getMyBookings = async (userId, query = {}) => {
     }
   };
 };
+
 
 /**
  * Retrieves a single booking by ID with ownership enforcement.
@@ -294,7 +351,8 @@ const getBookingById = async (bookingId, requestingUser) => {
   }
 
   // Authorization check: only admin or the booking's owner may view details
-  const isOwner = booking.user && booking.user._id.toString() === requestingUser._id.toString();
+  const bookingUserId = (booking.user?._id || booking.user)?.toString();
+  const isOwner = Boolean(bookingUserId && bookingUserId === requestingUser._id.toString());
   const isAdmin = requestingUser.role === 'admin';
 
   if (!isOwner && !isAdmin) {
@@ -322,13 +380,18 @@ const getBookingById = async (bookingId, requestingUser) => {
 const cancelBooking = async (bookingId, requestingUser, reason = '') => {
   validateObjectId(bookingId, 'booking');
 
+  if (reason && (typeof reason !== 'string' || reason.length > 500)) {
+    throw new AppError('Cancellation reason cannot exceed 500 characters', 400);
+  }
+
   const booking = await Booking.findById(bookingId);
   if (!booking) {
     throw new AppError('Booking not found', 404);
   }
 
-  // Authorization check
-  const isOwner = booking.user.toString() === requestingUser._id.toString();
+  // Authorization check: handle both populated and unpopulated user references
+  const bookingUserId = (booking.user?._id || booking.user)?.toString();
+  const isOwner = Boolean(bookingUserId && bookingUserId === requestingUser._id.toString());
   const isAdmin = requestingUser.role === 'admin';
 
   if (!isOwner && !isAdmin) {
@@ -347,20 +410,34 @@ const cancelBooking = async (bookingId, requestingUser, reason = '') => {
     );
   }
 
-  // Perform cancellation
-  booking.status = 'cancelled';
-  booking.cancellation = {
-    cancelledAt: new Date(),
-    reason: reason ? String(reason).trim() : (isAdmin ? 'Cancelled by administrator' : 'Cancelled by customer')
-  };
+  // Perform atomic cancellation to prevent concurrent race conditions
+  const updatedBooking = await Booking.findOneAndUpdate(
+    { _id: booking._id, status: { $in: ['pending', 'confirmed'] } },
+    {
+      $set: {
+        status: 'cancelled',
+        cancellation: {
+          cancelledAt: new Date(),
+          reason: reason ? String(reason).trim() : (isAdmin ? 'Cancelled by administrator' : 'Cancelled by customer')
+        }
+      }
+    },
+    { returnDocument: 'after' }
+  );
 
-  await booking.save();
+  if (!updatedBooking) {
+    const latest = await Booking.findById(booking._id);
+    if (latest && latest.status === 'cancelled') {
+      throw new AppError('Booking is already cancelled', 400);
+    }
+    throw new AppError(`Cannot cancel booking with status "${latest ? latest.status : 'unknown'}"`, 400);
+  }
 
   // Reconcile associated payment if completed
   try {
     const completedPayment = await Payment.findOne({
       booking: booking._id,
-      status: 'completed'
+      status: { $in: ['completed', 'partially_refunded'] }
     });
     if (completedPayment) {
       completedPayment.metadata.set('requiresRefund', 'true');
@@ -393,6 +470,25 @@ const cancelBooking = async (bookingId, requestingUser, reason = '') => {
 const listAllBookings = async (query = {}) => {
   const { page, limit, skip } = parsePagination(query);
   const filter = {};
+
+  // Support search by Booking ID (if valid ObjectId) or guest name/email
+  if (query.search) {
+    const term = String(query.search).trim();
+    if (term.length > 100) {
+      throw new AppError('Search query cannot exceed 100 characters', 400);
+    }
+    if (term) {
+      if (mongoose.Types.ObjectId.isValid(term) && term.length === 24) {
+        filter._id = term;
+      } else {
+        const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        filter.$or = [
+          { 'guestInfo.name': { $regex: escaped, $options: 'i' } },
+          { 'guestInfo.email': { $regex: escaped, $options: 'i' } }
+        ];
+      }
+    }
+  }
 
   if (query.hotel) {
     validateObjectId(query.hotel, 'hotel');
@@ -432,8 +528,54 @@ const listAllBookings = async (query = {}) => {
     Booking.countDocuments(filter)
   ]);
 
+  // Batch-populate associated payments for administrator oversight
+  const bookingIds = bookings.map((b) => b._id);
+  const payments = bookingIds.length
+    ? await Payment.find({ booking: { $in: bookingIds } })
+        .select('_id booking amount currency status provider transactionId paymentMethod refund metadata createdAt')
+        .sort({ createdAt: -1 })
+        .lean()
+    : [];
+
+  const paymentMap = new Map();
+  for (const p of payments) {
+    const bId = p.booking.toString();
+    if (!paymentMap.has(bId)) {
+      paymentMap.set(bId, p);
+    } else {
+      const existing = paymentMap.get(bId);
+      if (!isSettledStatus(existing.status) && isSettledStatus(p.status)) {
+        paymentMap.set(bId, p);
+      }
+    }
+  }
+
+  const enrichedBookings = bookings.map((b) => {
+    const p = paymentMap.get(b._id.toString());
+    const sanitizedPayment = p
+      ? {
+          _id: p._id,
+          amount: p.amount,
+          currency: p.currency,
+          status: p.status,
+          provider: p.provider,
+          transactionId: p.transactionId,
+          paymentMethod: p.paymentMethod,
+          refund: p.refund,
+          requiresRefund: p.metadata instanceof Map ? p.metadata.get('requiresRefund') === 'true' : p.metadata?.requiresRefund === 'true',
+          reconciliationReason: p.metadata instanceof Map ? p.metadata.get('reconciliationReason') : p.metadata?.reconciliationReason || null,
+          createdAt: p.createdAt
+        }
+      : null;
+
+    return {
+      ...b,
+      payment: sanitizedPayment
+    };
+  });
+
   return {
-    bookings,
+    bookings: enrichedBookings,
     pagination: {
       total,
       page,
@@ -442,6 +584,7 @@ const listAllBookings = async (query = {}) => {
     }
   };
 };
+
 
 /**
  * Updates booking status (Administrator only), strictly enforcing permitted lifecycle transitions.
@@ -471,16 +614,54 @@ const updateBookingStatus = async (bookingId, newStatus, reason = '', adminUser)
     );
   }
 
-  booking.status = newStatus;
+  // Guard against manually confirming bookings whose reservation hold has expired
+  if (currentStatus === 'pending' && newStatus === 'confirmed') {
+    if (isBookingHoldExpired(booking)) {
+      throw new AppError('Cannot confirm a booking whose reservation hold has expired.', 400);
+    }
+  }
 
+  // Atomic state transition
+  const updateData = { status: newStatus };
   if (newStatus === 'cancelled') {
-    booking.cancellation = {
+    updateData.cancellation = {
       cancelledAt: new Date(),
       reason: reason ? String(reason).trim() : 'Cancelled by administrator'
     };
   }
 
-  await booking.save();
+  const updatedBooking = await Booking.findOneAndUpdate(
+    { _id: booking._id, status: currentStatus },
+    { $set: updateData },
+    { returnDocument: 'after' }
+  );
+
+  if (!updatedBooking) {
+    throw new AppError('Booking status changed concurrently. Please refresh and retry.', 409);
+  }
+
+  // If administrator cancelled a booking, flag any completed payment for refund reconciliation
+  if (newStatus === 'cancelled') {
+    try {
+      const completedPayment = await Payment.findOne({
+        booking: booking._id,
+        status: { $in: ['completed', 'partially_refunded'] }
+      });
+      if (completedPayment) {
+        completedPayment.metadata.set('requiresRefund', 'true');
+        completedPayment.metadata.set('reconciliationStatus', 'refund_eligible');
+        completedPayment.metadata.set(
+          'reconciliationReason',
+          'Booking cancelled by administrator after payment completion'
+        );
+        await completedPayment.save();
+      }
+    } catch (payErr) {
+      console.error(
+        `[BookingService] Error updating reconciliation on payment for admin-cancelled booking ${booking._id}: ${payErr.message}`
+      );
+    }
+  }
 
   return await Booking.findById(booking._id)
     .select('-__v')

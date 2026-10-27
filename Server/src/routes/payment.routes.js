@@ -18,6 +18,9 @@ router.get('/reconciliation', protect, restrictTo('admin'), paymentController.li
 // Retrieve payment details by ID (Owner or Admin)
 router.get('/:id', protect, paymentController.getPaymentById);
 
+// Simulate mock payment outcome (Owner or Admin; Mock provider only)
+router.post('/:id/simulate-mock', protect, paymentController.simulateMockPayment);
+
 // Issue full or partial refund for a completed payment (Owner or Admin)
 router.post('/:id/refund', protect, paymentController.processRefund);
 

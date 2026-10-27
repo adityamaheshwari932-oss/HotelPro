@@ -159,6 +159,17 @@ export const AuthProvider = ({ children }) => {
     setIsLoading(false);
   }, []);
 
+  /**
+   * Updates the in-memory authenticated user state following a successful profile update.
+   */
+  const updateUser = useCallback((updatedUserData) => {
+    if (!updatedUserData) return;
+    setUser((prev) => ({
+      ...prev,
+      ...updatedUserData
+    }));
+  }, []);
+
   const value = {
     user,
     isAuthenticated: !!user,
@@ -166,10 +177,12 @@ export const AuthProvider = ({ children }) => {
     login,
     register,
     logout,
-    validateSession
+    validateSession,
+    updateUser
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
+
 
 export default AuthProvider;

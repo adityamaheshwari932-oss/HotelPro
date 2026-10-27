@@ -5,7 +5,11 @@ const { withCheckoutLock } = require('../utils/checkoutLock');
 const { withPaymentLock } = require('../utils/paymentLock');
 const { isBookingHoldExpired } = require('./booking.service');
 const { AppError } = require('../middleware/error.middleware');
-const { validateCheckoutSessionInput, validateRefundInput } = require('../validators/payment.validator');
+const {
+  validateCheckoutSessionInput,
+  validateRefundInput,
+  validateMockSimulationInput
+} = require('../validators/payment.validator');
 const { validateObjectId, parsePagination } = require('../validators/room.validator');
 
 const DEFAULT_WEBHOOK_STALE_TIMEOUT_MS = 15000; // 15 seconds
@@ -46,7 +50,8 @@ const createCheckoutSession = async (payload, authenticatedUser) => {
   }
 
   // 3. Enforce strict ownership: Customer can only checkout their own booking
-  if (booking.user.toString() !== authenticatedUser._id.toString()) {
+  const bookingUserId = (booking.user?._id || booking.user)?.toString();
+  if (bookingUserId !== authenticatedUser._id.toString()) {
     throw new AppError('You do not have permission to checkout for this booking', 403);
   }
 
@@ -300,6 +305,33 @@ const createCheckoutSession = async (payload, authenticatedUser) => {
 };
 
 /**
+ * Safely sanitizes metadata for external presentation.
+ * Strips clientSecret, provider credentials, tokens, and any sensitive or internal keys.
+ *
+ * @param {Map|object} metadata
+ * @returns {object} Cleaned metadata object
+ */
+const sanitizeMetadata = (metadata) => {
+  if (!metadata) return {};
+  let entries;
+  if (metadata instanceof Map) {
+    entries = Array.from(metadata.entries());
+  } else if (typeof metadata === 'object') {
+    entries = Object.entries(metadata);
+  } else {
+    return {};
+  }
+  const safe = {};
+  const sensitiveRegex = /secret|key|token|auth|credential|password|hash|private/i;
+  for (const [k, v] of entries) {
+    if (!k.startsWith('_') && !sensitiveRegex.test(k)) {
+      safe[k] = v;
+    }
+  }
+  return safe;
+};
+
+/**
  * Retrieves a single payment document by ID with ownership enforcement.
  *
  * @param {string} paymentId
@@ -307,29 +339,74 @@ const createCheckoutSession = async (payload, authenticatedUser) => {
  * @returns {Promise<object>} Payment document populated with booking
  */
 const getPaymentById = async (paymentId, authenticatedUser) => {
+  if (!authenticatedUser || !authenticatedUser._id) {
+    throw new AppError('Authentication is required to view payment information', 401);
+  }
+
   validateObjectId(paymentId, 'payment');
 
   const payment = await Payment.findById(paymentId)
     .select('-__v')
     .populate({
       path: 'booking',
-      select: 'hotel room user checkInDate checkOutDate totalAmount status guestInfo'
+      select: 'hotel room user checkInDate checkOutDate totalAmount status guestInfo priceSnapshot',
+      populate: [
+        { path: 'room', select: 'roomNumber roomType basePrice' },
+        { path: 'hotel', select: 'name address contact' }
+      ]
     });
 
   if (!payment) {
     throw new AppError('Payment record not found', 404);
   }
 
-  // Ownership check
-  const isOwner = payment.booking?.user?.toString() === authenticatedUser._id.toString();
+  // Resilient ownership check
+  const bookingUserId = (payment.booking?.user?._id || payment.booking?.user)?.toString();
+  const isOwner = bookingUserId && bookingUserId === authenticatedUser._id.toString();
   const isAdmin = authenticatedUser.role === 'admin';
 
   if (!isOwner && !isAdmin) {
     throw new AppError('You do not have permission to view this payment record', 403);
   }
 
-  return payment;
+  const sanitizedMeta = sanitizeMetadata(payment.metadata);
+
+  return {
+    _id: payment._id,
+    id: payment._id.toString(),
+    booking: payment.booking,
+    amount: payment.amount,
+    currency: payment.currency,
+    status: payment.status,
+    provider: payment.provider,
+    transactionId: payment.transactionId || '',
+    paymentMethod: {
+      methodType: payment.paymentMethod?.methodType || 'card',
+      cardBrand: payment.paymentMethod?.cardBrand || '',
+      cardLast4: payment.paymentMethod?.cardLast4 || undefined
+    },
+    refund: payment.refund ? {
+      status: payment.refund.status || 'none',
+      amount: payment.refund.amount || 0,
+      reason: payment.refund.reason || '',
+      refundedAt: payment.refund.refundedAt || undefined
+    } : undefined,
+    refunds: (payment.refunds || []).map((r) => ({
+      refundTransactionId: r.refundTransactionId || '',
+      amount: r.amount,
+      status: r.status,
+      reason: r.reason || '',
+      requestedAt: r.requestedAt,
+      completedAt: r.completedAt
+    })),
+    metadata: sanitizedMeta,
+    reconciliationStatus: sanitizedMeta.reconciliationStatus || (payment.metadata?.get ? payment.metadata.get('reconciliationStatus') : undefined),
+    reconciliationReason: sanitizedMeta.reconciliationReason || (payment.metadata?.get ? payment.metadata.get('reconciliationReason') : undefined),
+    createdAt: payment.createdAt,
+    updatedAt: payment.updatedAt
+  };
 };
+
 
 /**
  * Processes a full or partial refund for a completed payment.
@@ -365,14 +442,43 @@ const processRefund = async (params, authenticatedUser) => {
     }
 
     // Authorization check
-    const isOwner = payment.booking?.user?.toString() === authenticatedUser._id.toString();
+    const bookingUserId = (payment.booking?.user?._id || payment.booking?.user)?.toString();
+    const isOwner = bookingUserId && bookingUserId === authenticatedUser._id.toString();
     const isAdmin = authenticatedUser.role === 'admin';
 
     if (!isOwner && !isAdmin) {
       throw new AppError('You do not have permission to refund this payment', 403);
     }
 
-    // State eligibility check
+    // 1. Derive stable effective idempotency key (client-supplied or deterministically generated)
+    const effectiveIdempotencyKey = idempotencyKey
+      ? String(idempotencyKey).trim()
+      : `ref_idem_${payment._id}_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+
+    // 2. Idempotency check against existing refund records
+    const existing = (payment.refunds || []).find((r) => r.idempotencyKey === effectiveIdempotencyKey);
+    if (existing) {
+      if (existing.status === 'completed') {
+        return {
+          success: true,
+          idempotent: true,
+          paymentId: payment._id,
+          refundTransactionId: existing.refundTransactionId,
+          amount: existing.amount,
+          status: payment.status,
+          totalRefunded: payment.refund?.amount || existing.amount,
+          remainingRefundable: Math.max(0, Math.round((payment.amount - (payment.refund?.amount || existing.amount)) * 100) / 100),
+          isFullRefund: payment.status === 'refunded',
+          message: 'Refund was already processed with this idempotency key'
+        };
+      }
+      const pendingAgeMs = existing.requestedAt ? (Date.now() - new Date(existing.requestedAt).getTime()) : 0;
+      if (existing.status === 'pending' && pendingAgeMs < 15000) {
+        throw new AppError('A refund with this idempotency key is already in progress', 409);
+      }
+    }
+
+    // 3. State eligibility check (for new or retried non-completed refund requests)
     if (payment.status !== 'completed' && payment.status !== 'partially_refunded') {
       throw new AppError(
         `Cannot refund payment with status "${payment.status}". Only completed or partially refunded payments are eligible.`,
@@ -380,11 +486,25 @@ const processRefund = async (params, authenticatedUser) => {
       );
     }
 
-    // Calculate remaining refundable amount
+    // 4. Calculate already completed refund amount
     const alreadyRefunded = (payment.refund && typeof payment.refund.amount === 'number')
       ? payment.refund.amount
       : 0;
-    const remainingRefundable = Math.round((payment.amount - alreadyRefunded) * 100) / 100;
+
+    // 4. Calculate active pending reservations in database to prevent concurrent over-refunding
+    const nowMs = Date.now();
+    const activePendingEntries = (payment.refunds || []).filter((r) => {
+      if (r.status !== 'pending') return false;
+      if (existing && String(r._id) === String(existing._id)) return false; // exclude current retry entry
+      const ageMs = r.requestedAt ? (nowMs - new Date(r.requestedAt).getTime()) : 0;
+      return ageMs < 60000; // active within last 60 seconds
+    });
+    const reservedPendingAmount = activePendingEntries.reduce((sum, r) => sum + (r.amount || 0), 0);
+
+    const remainingRefundable = Math.max(
+      0,
+      Math.round((payment.amount - alreadyRefunded - reservedPendingAmount) * 100) / 100
+    );
 
     if (remainingRefundable <= 0) {
       throw new AppError('Payment has already been fully refunded', 400);
@@ -403,31 +523,39 @@ const processRefund = async (params, authenticatedUser) => {
       );
     }
 
-    // Idempotency check
-    if (idempotencyKey) {
-      const existing = (payment.refunds || []).find((r) => r.idempotencyKey === idempotencyKey);
-      if (existing) {
-        if (existing.status === 'completed') {
-          return {
-            success: true,
-            idempotent: true,
-            paymentId: payment._id,
-            refundTransactionId: existing.refundTransactionId,
-            amount: existing.amount,
-            status: payment.status,
-            totalRefunded: payment.refund?.amount || existing.amount,
-            remainingRefundable: Math.round((payment.amount - (payment.refund?.amount || existing.amount)) * 100) / 100,
-            isFullRefund: payment.status === 'refunded',
-            message: 'Refund was already processed with this idempotency key'
-          };
+    // 5. Reserve refund amount in database before calling external provider
+    const mongoose = require('mongoose');
+    const pendingRefundId = (existing && existing.status !== 'completed') ? existing._id : new mongoose.Types.ObjectId();
+    if (existing && existing.status !== 'completed') {
+      await Payment.updateOne(
+        { _id: payment._id, 'refunds._id': pendingRefundId },
+        {
+          $set: {
+            'refunds.$.requestedAt': new Date(),
+            'refunds.$.amount': refundAmount,
+            'refunds.$.status': 'pending',
+            'refunds.$.reason': reason || '',
+            'refunds.$.errorMessage': ''
+          }
         }
-        if (existing.status === 'pending') {
-          throw new AppError('A refund with this idempotency key is already in progress', 409);
+      );
+    } else {
+      await Payment.findByIdAndUpdate(payment._id, {
+        $push: {
+          refunds: {
+            _id: pendingRefundId,
+            refundTransactionId: '',
+            amount: refundAmount,
+            status: 'pending',
+            reason: reason || '',
+            idempotencyKey: effectiveIdempotencyKey,
+            requestedAt: new Date()
+          }
         }
-      }
+      });
     }
 
-    // Call provider adapter
+    // 6. Call provider adapter
     const provider = getPaymentProvider(payment.provider);
     let refundResult;
     try {
@@ -438,86 +566,66 @@ const processRefund = async (params, authenticatedUser) => {
         currency: payment.currency,
         reason,
         simulation,
-        idempotencyKey
+        idempotencyKey: effectiveIdempotencyKey
       });
     } catch (providerErr) {
-      const failedEntry = {
-        amount: refundAmount,
-        status: 'failed',
-        reason: reason || '',
-        idempotencyKey: idempotencyKey || undefined,
-        errorMessage: providerErr.message || 'Payment provider refund call threw an error',
-        requestedAt: new Date()
-      };
-
-      await Payment.findByIdAndUpdate(payment._id, {
-        $push: { refunds: failedEntry },
-        $set: {
-          'metadata.reconciliationStatus': 'refund_failed',
-          'metadata.reconciliationReason': providerErr.message || 'Payment provider refund call threw an error'
+      await Payment.updateOne(
+        { _id: payment._id, 'refunds._id': pendingRefundId },
+        {
+          $set: {
+            'refunds.$.status': 'failed',
+            'refunds.$.errorMessage': providerErr.message || 'Payment provider refund call threw an error',
+            'metadata.reconciliationStatus': 'refund_failed',
+            'metadata.reconciliationReason': providerErr.message || 'Payment provider refund call threw an error'
+          }
         }
-      });
+      );
 
       throw new AppError(providerErr.message || 'Payment provider failed to process refund', 400);
     }
 
     if (!refundResult || !refundResult.success) {
-      const failedEntry = {
-        amount: refundAmount,
-        status: 'failed',
-        reason: reason || '',
-        idempotencyKey: idempotencyKey || undefined,
-        errorMessage: refundResult?.errorMessage || 'Payment provider refund call failed',
-        requestedAt: new Date()
-      };
-
-      await Payment.findByIdAndUpdate(payment._id, {
-        $push: { refunds: failedEntry },
-        $set: {
-          'metadata.reconciliationStatus': 'refund_failed',
-          'metadata.reconciliationReason': refundResult?.errorMessage || 'Payment provider refund call failed'
+      const errMessage = refundResult?.errorMessage || 'Payment provider refund call failed';
+      await Payment.updateOne(
+        { _id: payment._id, 'refunds._id': pendingRefundId },
+        {
+          $set: {
+            'refunds.$.status': 'failed',
+            'refunds.$.errorMessage': errMessage,
+            'metadata.reconciliationStatus': 'refund_failed',
+            'metadata.reconciliationReason': errMessage
+          }
         }
-      });
+      );
 
-      throw new AppError(refundResult?.errorMessage || 'Payment provider failed to process refund', 400);
+      throw new AppError(errMessage, 400);
     }
 
-    // Provider confirmed refund: execute atomic database update
+    // 7. Provider confirmed refund: execute atomic database update
     const newTotalRefunded = Math.round((alreadyRefunded + refundAmount) * 100) / 100;
     const isFullRefund = newTotalRefunded >= payment.amount;
     const newStatus = isFullRefund ? 'refunded' : 'partially_refunded';
-
-    const refundEntry = {
-      refundTransactionId: refundResult.refundTransactionId || `ref_${Date.now()}`,
-      amount: refundAmount,
-      status: 'completed',
-      reason: reason || (isFullRefund ? 'Full refund' : 'Partial refund'),
-      idempotencyKey: idempotencyKey || undefined,
-      requestedAt: new Date(),
-      completedAt: refundResult.refundedAt || new Date()
-    };
+    const refundTxnId = refundResult.refundTransactionId || `ref_${Date.now()}`;
+    const completedAt = refundResult.refundedAt || new Date();
 
     await Payment.findOneAndUpdate(
       {
         _id: payment._id,
-        $or: [
-          { 'refund.amount': alreadyRefunded },
-          { 'refund.amount': { $exists: false } }
-        ]
+        'refunds._id': pendingRefundId
       },
       {
         $set: {
           status: newStatus,
           'refund.status': 'completed',
           'refund.amount': newTotalRefunded,
-          'refund.refundTransactionId': refundEntry.refundTransactionId,
-          'refund.refundedAt': refundEntry.completedAt,
-          'refund.reason': refundEntry.reason,
+          'refund.refundTransactionId': refundTxnId,
+          'refund.refundedAt': completedAt,
+          'refund.reason': reason || (isFullRefund ? 'Full refund' : 'Partial refund'),
+          'refunds.$.status': 'completed',
+          'refunds.$.refundTransactionId': refundTxnId,
+          'refunds.$.completedAt': completedAt,
           'metadata.requiresRefund': isFullRefund ? 'false' : 'true',
           'metadata.reconciliationStatus': isFullRefund ? 'refund_confirmed' : 'partially_refunded'
-        },
-        $push: {
-          refunds: refundEntry
         }
       },
       { returnDocument: 'after' }
@@ -525,12 +633,13 @@ const processRefund = async (params, authenticatedUser) => {
 
     return {
       success: true,
+      idempotent: !!refundResult.idempotent,
       paymentId: payment._id,
-      refundTransactionId: refundEntry.refundTransactionId,
+      refundTransactionId: refundTxnId,
       amount: refundAmount,
       status: newStatus,
       totalRefunded: newTotalRefunded,
-      remainingRefundable: Math.round((payment.amount - newTotalRefunded) * 100) / 100,
+      remainingRefundable: Math.max(0, Math.round((payment.amount - newTotalRefunded) * 100) / 100),
       isFullRefund,
       message: isFullRefund ? 'Payment fully refunded successfully' : 'Partial refund processed successfully'
     };
@@ -581,8 +690,39 @@ const listReconciliations = async (query = {}, authenticatedUser) => {
     Payment.countDocuments(filter)
   ]);
 
+  const sanitizedRecords = records.map((record) => {
+    const meta = sanitizeMetadata(record.metadata);
+    return {
+      _id: record._id,
+      id: record._id.toString(),
+      booking: record.booking,
+      amount: record.amount,
+      currency: record.currency,
+      status: record.status,
+      provider: record.provider,
+      transactionId: record.transactionId || '',
+      paymentMethod: {
+        methodType: record.paymentMethod?.methodType || 'card',
+        cardBrand: record.paymentMethod?.cardBrand || '',
+        cardLast4: record.paymentMethod?.cardLast4 || undefined
+      },
+      refund: record.refund ? {
+        status: record.refund.status || 'none',
+        amount: record.refund.amount || 0,
+        reason: record.refund.reason || '',
+        refundedAt: record.refund.refundedAt || undefined
+      } : undefined,
+      metadata: meta,
+      reconciliationStatus: meta.reconciliationStatus || undefined,
+      reconciliationReason: meta.reconciliationReason || undefined,
+      requiresRefund: meta.requiresRefund === 'true',
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt
+    };
+  });
+
   return {
-    reconciliations: records,
+    reconciliations: sanitizedRecords,
     pagination: {
       total,
       page,
@@ -796,6 +936,7 @@ const executeWebhookBusinessLogic = async ({ provider, verification }) => {
 
         const updateSet = {
           'metadata.requiresRefund': 'true',
+          'metadata.reconciliationStatus': 'refund_eligible',
           'metadata.reconciliationReason': reconciliationReason
         };
 
@@ -856,6 +997,7 @@ const executeWebhookBusinessLogic = async ({ provider, verification }) => {
           : 'Payment received after booking was cancelled'
       );
       payment.metadata.set('requiresRefund', 'true');
+      payment.metadata.set('reconciliationStatus', 'refund_eligible');
       if (booking.cancellation?.cancelledAt) {
         payment.metadata.set('expiredAt', new Date(booking.cancellation.cancelledAt).toISOString());
       }
@@ -923,6 +1065,7 @@ const executeWebhookBusinessLogic = async ({ provider, verification }) => {
             : 'Booking was cancelled concurrently during payment confirmation'
         );
         payment.metadata.set('requiresRefund', 'true');
+        payment.metadata.set('reconciliationStatus', 'refund_eligible');
         if (latestBooking.cancellation?.cancelledAt) {
           payment.metadata.set('expiredAt', new Date(latestBooking.cancellation.cancelledAt).toISOString());
         }
@@ -948,15 +1091,7 @@ const executeWebhookBusinessLogic = async ({ provider, verification }) => {
   }
 
   if (outcomeStatus === 'refunded' || verification.eventType === 'charge.refunded' || verification.eventType === 'payment_intent.refunded') {
-    if (payment.status === 'refunded') {
-      return {
-        success: true,
-        alreadyRefunded: true,
-        paymentId: payment._id,
-        message: 'Payment was already marked refunded'
-      };
-    }
-
+    const rawTxnId = verification.rawEvent?.id || verification.eventId || payment.refund?.refundTransactionId || '';
     const refundAmount = (amount !== undefined && amount !== null)
       ? Number(amount)
       : payment.amount;
@@ -965,10 +1100,49 @@ const executeWebhookBusinessLogic = async ({ provider, verification }) => {
     const isFullRefund = newTotalRefunded >= payment.amount;
     const newStatus = isFullRefund ? 'refunded' : 'partially_refunded';
 
+    // Check for duplicate webhook delivery (already refunded to this level and matching transaction)
+    const existingRefundMatch = (payment.refunds || []).find(
+      (r) => r.refundTransactionId && r.refundTransactionId === rawTxnId && r.status === 'completed'
+    );
+    if ((payment.status === 'refunded' && isFullRefund) || (existingRefundMatch && payment.refund?.amount >= newTotalRefunded)) {
+      return {
+        success: true,
+        idempotent: true,
+        alreadyRefunded: true,
+        paymentId: payment._id,
+        status: payment.status,
+        amountRefunded: payment.refund?.amount || newTotalRefunded,
+        message: 'Payment refund webhook event was already reconciled'
+      };
+    }
+
+    // Reconcile with existing pending refund entry if present
+    const pendingMatch = (payment.refunds || []).find(
+      (r) => r.status === 'pending' || (r.refundTransactionId && r.refundTransactionId === rawTxnId)
+    );
+
+    if (pendingMatch) {
+      pendingMatch.status = 'completed';
+      pendingMatch.refundTransactionId = rawTxnId || pendingMatch.refundTransactionId || `ref_wh_${Date.now()}`;
+      pendingMatch.completedAt = new Date();
+      if (!pendingMatch.amount) pendingMatch.amount = refundAmount;
+    } else {
+      if (!payment.refunds) payment.refunds = [];
+      payment.refunds.push({
+        refundTransactionId: rawTxnId || `ref_wh_${Date.now()}`,
+        amount: refundAmount,
+        status: 'completed',
+        reason: 'Refund confirmed via gateway webhook',
+        requestedAt: new Date(),
+        completedAt: new Date()
+      });
+    }
+
     payment.status = newStatus;
+    if (!payment.refund) payment.refund = {};
     payment.refund.status = 'completed';
     payment.refund.amount = newTotalRefunded;
-    payment.refund.refundTransactionId = verification.rawEvent?.id || verification.eventId || payment.refund.refundTransactionId;
+    payment.refund.refundTransactionId = rawTxnId || payment.refund.refundTransactionId;
     payment.refund.refundedAt = new Date();
     payment.metadata.set('requiresRefund', isFullRefund ? 'false' : 'true');
     payment.metadata.set('reconciliationStatus', isFullRefund ? 'refund_confirmed' : 'partially_refunded');
@@ -1318,9 +1492,211 @@ const processWebhook = async ({ providerName = 'mock', rawBody, signature, heade
   }
 };
 
+/**
+ * Retrieves the latest relevant payment attempt and status summary for a booking.
+ *
+ * SAFETY & AUTHORIZATION GUARANTEES:
+ * 1. Requires valid authentication.
+ * 2. Strict ownership: User must be booking owner or admin.
+ * 3. Read-only: Does NOT alter booking or payment state.
+ * 4. Zero Sensitive Leakage: Completely strips internal clientSecret, locks, credentials, and gateway signatures.
+ * 5. Deterministic selection: If multiple payments exist, prioritizes settled (completed/refunded),
+ *    then active pending, then latest chronological attempt.
+ *
+ * @param {string} bookingId
+ * @param {object} authenticatedUser - req.user
+ * @returns {Promise<object>} Payment summary object
+ */
+const getPaymentByBookingId = async (bookingId, authenticatedUser) => {
+  if (!authenticatedUser || !authenticatedUser._id) {
+    throw new AppError('Authentication is required to view payment information', 401);
+  }
+
+  validateObjectId(bookingId, 'booking');
+
+  const booking = await Booking.findById(bookingId);
+  if (!booking) {
+    throw new AppError('Booking not found', 404);
+  }
+
+  // Authorization check: User must be booking owner or an admin
+  const bookingUserId = (booking.user?._id || booking.user)?.toString();
+  const isOwner = bookingUserId && bookingUserId === authenticatedUser._id.toString();
+  const isAdmin = authenticatedUser.role === 'admin';
+
+  if (!isOwner && !isAdmin) {
+    throw new AppError('You do not have permission to view payment information for this booking', 403);
+  }
+
+  // Query all payments associated with this booking, newest first
+  const payments = await Payment.find({ booking: booking._id })
+    .sort({ createdAt: -1, _id: -1 })
+    .lean();
+
+  if (!payments || payments.length === 0) {
+    return {
+      bookingId: booking._id,
+      hasPayment: false,
+      hasActivePendingSession: false,
+      payment: null,
+      totalAttempts: 0
+    };
+  }
+
+  // Identify the most relevant payment attempt:
+  // 1. Settled payment (completed, refunded, partially_refunded) takes top priority
+  // 2. Currently active pending session takes second priority
+  // 3. Otherwise, latest chronological attempt (e.g. failed)
+  const settledPayment = payments.find((p) =>
+    ['completed', 'partially_refunded', 'refunded'].includes(p.status)
+  );
+  const pendingPayment = payments.find((p) => p.status === 'pending');
+  const relevantPayment = settledPayment || pendingPayment || payments[0];
+
+  // Sanitize payment details: strictly exclude metadata (clientSecret), credentials, and internal fields
+  const sanitizedPayment = {
+    _id: relevantPayment._id,
+    booking: relevantPayment.booking,
+    amount: relevantPayment.amount,
+    currency: relevantPayment.currency,
+    status: relevantPayment.status,
+    provider: relevantPayment.provider,
+    transactionId: relevantPayment.transactionId || '',
+    paymentMethod: {
+      methodType: relevantPayment.paymentMethod?.methodType || 'card',
+      cardBrand: relevantPayment.paymentMethod?.cardBrand || '',
+      cardLast4: relevantPayment.paymentMethod?.cardLast4 || undefined
+    },
+    refund: relevantPayment.refund ? {
+      status: relevantPayment.refund.status || 'none',
+      amount: relevantPayment.refund.amount || 0,
+      reason: relevantPayment.refund.reason || '',
+      refundedAt: relevantPayment.refund.refundedAt || undefined
+    } : undefined,
+    createdAt: relevantPayment.createdAt,
+    updatedAt: relevantPayment.updatedAt
+  };
+
+  return {
+    bookingId: booking._id,
+    hasPayment: true,
+    hasActivePendingSession: !!pendingPayment,
+    payment: sanitizedPayment,
+    totalAttempts: payments.length
+  };
+};
+
+/**
+ * Safely simulates a mock payment outcome for local development & testing.
+ *
+ * SAFETY & SECURITY GUARANTEES:
+ * 1. Authentication & Ownership: Caller must own the payment's associated booking or be admin.
+ * 2. Active Provider Check: Strictly rejects requests if PAYMENT_PROVIDER !== 'mock'.
+ * 3. Payment Provider Check: Strictly rejects requests if payment.provider !== 'mock'.
+ * 4. Outcome Allowlist: Accepts strictly 'success' or 'failure'.
+ * 5. Reuses Canonical Logic: Delegates directly to `processWebhook` which exercises full
+ *    WebhookEvent idempotency, atomic lease locks, hold expiration checks, late payment flagging,
+ *    and state transitions. Does NOT directly mutate status or bypass safeguards.
+ * 6. Idempotency: Repeated simulation requests return idempotent outcomes without duplicate updates.
+ *
+ * @param {string} paymentId
+ * @param {object} payload - { outcome: 'success' | 'failure', failureReason?: string }
+ * @param {object} authenticatedUser - req.user
+ * @returns {Promise<object>} Outcome summary
+ */
+const simulateMockPayment = async (paymentId, payload, authenticatedUser) => {
+  if (!authenticatedUser || !authenticatedUser._id) {
+    throw new AppError('Authentication is required to simulate payment', 401);
+  }
+
+  validateObjectId(paymentId, 'payment');
+
+  // Server-side provider configuration enforcement:
+  // Reject when active provider is Stripe or another real provider.
+  const configuredProvider = (process.env.PAYMENT_PROVIDER || 'mock').toLowerCase();
+  if (configuredProvider !== 'mock') {
+    throw new AppError('Mock payment simulation is disabled or unavailable for the active payment provider', 400);
+  }
+
+  // Validate simulation outcome against allowlist and block raw credentials
+  const { outcome, failureReason } = validateMockSimulationInput(payload);
+
+  // Load target Payment and associated Booking
+  const payment = await Payment.findById(paymentId).populate('booking');
+  if (!payment) {
+    throw new AppError('Payment record not found', 404);
+  }
+
+  // Payment-level provider check: payment itself must be mock
+  if (payment.provider !== 'mock') {
+    throw new AppError('Mock simulation can only be performed on mock payments', 400);
+  }
+
+  // Enforce ownership: Caller must own the booking or be admin
+  const bookingUserId = (payment.booking?.user?._id || payment.booking?.user)?.toString();
+  const isOwner = bookingUserId && bookingUserId === authenticatedUser._id.toString();
+  const isAdmin = authenticatedUser.role === 'admin';
+  if (!isOwner && !isAdmin) {
+    throw new AppError('You do not have permission to simulate payment for this booking', 403);
+  }
+
+  if (!payment.transactionId) {
+    throw new AppError('Payment record has no associated transaction ID', 400);
+  }
+
+  // Construct canonical mock webhook event payload
+  const eventType = outcome === 'success' ? 'payment_intent.succeeded' : 'payment_intent.payment_failed';
+  const eventPayload = {
+    id: `evt_sim_${payment._id}_${outcome}`,
+    type: eventType,
+    data: {
+      transactionId: payment.transactionId,
+      bookingId: payment.booking?._id ? payment.booking._id.toString() : payment.booking.toString(),
+      amount: payment.amount,
+      currency: payment.currency,
+      status: outcome === 'success' ? 'completed' : 'failed',
+      failureReason: outcome === 'failure' ? failureReason : undefined
+    }
+  };
+
+  const rawBody = Buffer.from(JSON.stringify(eventPayload), 'utf8');
+
+  // Route through the established, battle-tested webhook processing pipeline.
+  // This preserves WebhookEvent lease locking, idempotency deduplication,
+  // hold-expiration fencing, late payment reconciliation, and state machines.
+  const webhookOutcome = await processWebhook({
+    providerName: 'mock',
+    rawBody,
+    signature: 'mock_sig_valid',
+    headers: {
+      'x-mock-signature': 'mock_sig_valid',
+      'content-type': 'application/json'
+    }
+  });
+
+  // Reload authoritative records from MongoDB after webhook execution
+  const updatedPayment = await Payment.findById(payment._id);
+  const updatedBooking = await Booking.findById(payment.booking?._id || payment.booking);
+
+  return {
+    paymentId: updatedPayment._id,
+    bookingId: updatedBooking ? updatedBooking._id : (payment.booking?._id || payment.booking),
+    transactionId: updatedPayment.transactionId,
+    status: updatedPayment.status,
+    bookingStatus: updatedBooking ? updatedBooking.status : null,
+    outcome,
+    isConfirmed: updatedBooking ? updatedBooking.status === 'confirmed' : false,
+    requiresRefund: updatedPayment.metadata?.get('requiresRefund') === 'true',
+    reconciliationReason: updatedPayment.metadata?.get('reconciliationReason') || null,
+    idempotent: !!webhookOutcome?.idempotent
+  };
+};
+
 module.exports = {
   createCheckoutSession,
   getPaymentById,
+  getPaymentByBookingId,
+  simulateMockPayment,
   processRefund,
   listReconciliations,
   processWebhook,

@@ -328,10 +328,109 @@ const initializeInitialAdmin = async ({ name, email, password, phone, setupSecre
   }
 };
 
+/**
+ *
+ * SECURITY & PRIVACY ENFORCEMENT:
+ * - Customers can ONLY update their own profile.
+ * - Allowed update fields: 'name' and 'phone'.
+ * - Any attempt to modify protected fields ('role', 'status', 'password', 'passwordHash', 'email', '_id') is strictly rejected.
+ * - Inactive or suspended accounts cannot perform updates (403 Forbidden).
+ * - Password hashes and internal version fields are never returned in the response.
+ *
+ * @param {string} userId - Target user ID to update
+ * @param {object} updateData - { name?, phone? }
+ * @param {object} authenticatedUser - req.user from authentication middleware
+ * @returns {Promise<object>} Sanitized updated user object
+ */
+const updateProfile = async (userId, updateData = {}, authenticatedUser) => {
+  if (!authenticatedUser || !authenticatedUser._id) {
+    throw new AppError('Authentication is required to update profile.', 401);
+  }
+
+  // Enforce account active status
+  if (authenticatedUser.status !== 'active') {
+    throw new AppError(
+      'Your account is currently inactive or suspended. Please contact hotel administration.',
+      403
+    );
+  }
+
+  // Enforce ownership: user can only update their own profile
+  if (userId.toString() !== authenticatedUser._id.toString()) {
+    throw new AppError('You do not have permission to update another user profile.', 403);
+  }
+
+  if (!updateData || typeof updateData !== 'object' || Array.isArray(updateData)) {
+    throw new AppError('Profile update data must be an object.', 400);
+  }
+
+  // Reject unauthorized attempts to modify protected account fields
+  const forbiddenFields = ['role', 'status', 'password', 'passwordHash', 'email', '_id', '__v'];
+  for (const field of forbiddenFields) {
+    if (Object.prototype.hasOwnProperty.call(updateData, field)) {
+      throw new AppError(
+        `Field "${field}" cannot be modified through the profile endpoint. Only name and phone may be updated.`,
+        400
+      );
+    }
+  }
+
+  const updates = {};
+
+  // Validate 'name' if provided
+  if (updateData.name !== undefined) {
+    if (typeof updateData.name !== 'string' || updateData.name.trim().length < 2) {
+      throw new AppError('Name is required and must be at least 2 characters long.', 400);
+    }
+    if (updateData.name.trim().length > 100) {
+      throw new AppError('Name cannot exceed 100 characters.', 400);
+    }
+    updates.name = updateData.name.trim();
+  }
+
+  // Validate 'phone' if provided
+  if (updateData.phone !== undefined) {
+    if (typeof updateData.phone !== 'string') {
+      throw new AppError('Phone must be a string.', 400);
+    }
+    if (updateData.phone.trim().length > 30) {
+      throw new AppError('Phone number cannot exceed 30 characters.', 400);
+    }
+    updates.phone = updateData.phone.trim();
+  }
+
+  // Ensure at least one permitted field was provided
+  if (Object.keys(updates).length === 0) {
+    throw new AppError('At least one valid field (name or phone) must be provided for update.', 400);
+  }
+
+  const updatedUser = await User.findByIdAndUpdate(
+    authenticatedUser._id,
+    { $set: updates },
+    { returnDocument: 'after', runValidators: true }
+  ).select('-passwordHash -__v');
+
+  if (!updatedUser) {
+    throw new AppError('User account not found.', 404);
+  }
+
+  return {
+    id: updatedUser._id,
+    name: updatedUser.name,
+    email: updatedUser.email,
+    role: updatedUser.role,
+    phone: updatedUser.phone,
+    status: updatedUser.status,
+    createdAt: updatedUser.createdAt,
+    updatedAt: updatedUser.updatedAt
+  };
+};
+
 module.exports = {
   validatePasswordPolicy,
   normalizeEmail,
   registerCustomer,
   loginUser,
-  initializeInitialAdmin
+  initializeInitialAdmin,
+  updateProfile
 };

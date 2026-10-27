@@ -124,9 +124,34 @@ const handleWebhook = async (req, res, next) => {
   }
 };
 
+/**
+ * Simulates a mock payment outcome for local development & testing.
+ *
+ * Route: POST /api/payments/:id/simulate-mock
+ * Access: Protected (Owner / Admin; Mock provider only)
+ */
+const simulateMockPayment = async (req, res, next) => {
+  try {
+    const result = await paymentService.simulateMockPayment(
+      req.params.id,
+      req.body,
+      req.user
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'Mock payment simulation processed successfully',
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createCheckoutSession,
   getPaymentById,
+  simulateMockPayment,
   processRefund,
   listReconciliations,
   handleWebhook

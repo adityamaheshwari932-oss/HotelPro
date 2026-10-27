@@ -291,12 +291,34 @@ export const RoomDetailPage = () => {
             </div>
 
             <div className="sidebar-actions">
-              <Link
-                to={`/rooms?checkInDate=${checkInDate || ''}&checkOutDate=${checkOutDate || ''}&guests=${guests}`}
-                className="btn-primary-block"
-              >
-                {checkInDate && checkOutDate ? '🔍 Search More Rooms for These Dates' : '📅 Select Dates to Check Availability'}
-              </Link>
+              {checkInDate && checkOutDate ? (
+                <>
+                  <Link
+                    to={`/book/${room._id}?checkInDate=${encodeURIComponent(checkInDate)}&checkOutDate=${encodeURIComponent(checkOutDate)}&guests=${encodeURIComponent(guests)}`}
+                    className="btn-primary-block btn-reserve-hold-action"
+                  >
+                    🔒 Reserve Room Hold (15 Mins) →
+                  </Link>
+                  <Link
+                    to={`/rooms?checkInDate=${encodeURIComponent(checkInDate)}&checkOutDate=${encodeURIComponent(checkOutDate)}&guests=${encodeURIComponent(guests)}`}
+                    className="btn-secondary-block"
+                  >
+                    🔍 Search More Rooms for These Dates
+                  </Link>
+                </>
+              ) : (
+                <>
+                  <Link
+                    to={`/book/${room._id}?guests=${encodeURIComponent(guests)}`}
+                    className="btn-primary-block"
+                  >
+                    📅 Select Dates & Reserve Room →
+                  </Link>
+                  <Link to="/rooms" className="btn-secondary-block">
+                    🔍 Search All Available Rooms
+                  </Link>
+                </>
+              )}
             </div>
           </div>
         </aside>

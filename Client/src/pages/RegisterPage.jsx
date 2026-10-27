@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context';
 import { ApiError } from '../api/client';
@@ -20,9 +20,11 @@ export const RegisterPage = () => {
   const [successMessage, setSuccessMessage] = useState('');
 
   // If already authenticated, redirect to home
-  if (isAuthenticated && !isSubmitting) {
-    navigate('/', { replace: true });
-  }
+  useEffect(() => {
+    if (isAuthenticated && !isSubmitting) {
+      navigate('/', { replace: true });
+    }
+  }, [isAuthenticated, isSubmitting, navigate]);
 
   const validate = () => {
     const errors = {};

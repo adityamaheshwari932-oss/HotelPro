@@ -1,4 +1,5 @@
 const bookingService = require('../services/booking.service');
+const paymentService = require('../services/payment.service');
 
 /**
  * Creates a new booking reservation.
@@ -132,10 +133,30 @@ const updateBookingStatus = async (req, res, next) => {
   }
 };
 
+/**
+ * Retrieves the latest payment attempt or summary for a booking.
+ *
+ * Route: GET /api/bookings/:id/payment
+ * Access: Protected (Owner / Admin)
+ */
+const getBookingPayment = async (req, res, next) => {
+  try {
+    const paymentInfo = await paymentService.getPaymentByBookingId(req.params.id, req.user);
+
+    res.status(200).json({
+      success: true,
+      data: paymentInfo
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createBooking,
   getMyBookings,
   getBookingById,
+  getBookingPayment,
   cancelBooking,
   listBookings,
   updateBookingStatus

@@ -81,8 +81,31 @@ const getMe = async (req, res, next) => {
   }
 };
 
+/**
+ * Updates current authenticated user's profile.
+ *
+ * Route: PATCH /api/auth/me
+ * Access: Protected (Requires valid Bearer token)
+ */
+const updateMe = async (req, res, next) => {
+  try {
+    const updatedUser = await authService.updateProfile(req.user._id, req.body, req.user);
+
+    res.status(200).json({
+      success: true,
+      message: 'Profile updated successfully',
+      data: {
+        user: updatedUser
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   register,
   login,
-  getMe
+  getMe,
+  updateMe
 };

@@ -10,5 +10,6 @@ router.post('/login', authController.login);
 
 // Protected routes (require Bearer JWT)
 router.get('/me', protect, authController.getMe);
+router.patch('/me', protect, authController.updateMe);
 
 module.exports = router;
