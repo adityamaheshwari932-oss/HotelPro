@@ -5,9 +5,25 @@ const mongoose = require('mongoose');
 const app = express();
 
 // CORS configuration
-const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+const configuredClientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+const allowedOrigins = [
+  configuredClientUrl,
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:5175',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
+  'http://127.0.0.1:5175'
+];
+
 app.use(cors({
-  origin: clientUrl,
+  origin: (origin, callback) => {
+    // Allow non-browser requests (no origin header, e.g., mobile apps, curl)
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`Origin ${origin} is not allowed by CORS`));
+  },
   credentials: true
 }));
 

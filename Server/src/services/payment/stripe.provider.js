@@ -66,11 +66,13 @@ class StripePaymentProvider extends PaymentProvider {
   constructor(options = {}) {
     super('stripe');
 
-    const secretKey = options.secretKey || process.env.STRIPE_SECRET_KEY;
-    this.webhookSecret = options.webhookSecret || process.env.STRIPE_WEBHOOK_SECRET;
+    const secretKey = options.secretKey !== undefined ? options.secretKey : process.env.STRIPE_SECRET_KEY;
+    this.webhookSecret = options.webhookSecret !== undefined ? options.webhookSecret : process.env.STRIPE_WEBHOOK_SECRET;
 
     if (options.stripeClient) {
       this.stripe = options.stripeClient;
+    } else if (options.stripeClient === null) {
+      this.stripe = null;
     } else if (secretKey) {
       this.stripe = new Stripe(secretKey, {
         apiVersion: '2025-01-27.acacia'

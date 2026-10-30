@@ -44,6 +44,11 @@ export const RoomSearchForm = ({ onSearch, initialValues = {}, isLoading = false
 
   return (
     <form className="room-search-form" onSubmit={handleSubmit} noValidate aria-label="Room search filters">
+      <div className="search-form-header-bar">
+        <span className="search-pill-label"> Concierge Engine</span>
+        <span className="search-pill-desc">Instant availability scanning & dynamic price engine</span>
+      </div>
+
       <div className="search-form-grid">
         <div className="search-field">
           <label htmlFor="search-checkin">Check-in Date *</label>
@@ -121,10 +126,10 @@ export const RoomSearchForm = ({ onSearch, initialValues = {}, isLoading = false
             onChange={handleChange}
             className={formErrors.roomType ? 'input-error' : ''}
           >
-            <option value="">All Room Types</option>
-            <option value="single">Single Room</option>
-            <option value="double">Double Room</option>
-            <option value="suite">Luxury Suite</option>
+            <option value="">All Sanctuaries</option>
+            <option value="single">Single Suite</option>
+            <option value="double">Double Suite</option>
+            <option value="suite">Presidential Penthouse</option>
           </select>
           {formErrors.roomType && (
             <span className="field-error-message">{formErrors.roomType}</span>
@@ -132,7 +137,7 @@ export const RoomSearchForm = ({ onSearch, initialValues = {}, isLoading = false
         </div>
 
         <div className="search-field">
-          <label htmlFor="search-minprice">Min Stay Price ($)</label>
+          <label htmlFor="search-minprice">Min Price ($)</label>
           <input
             id="search-minprice"
             name="minPrice"
@@ -155,7 +160,7 @@ export const RoomSearchForm = ({ onSearch, initialValues = {}, isLoading = false
         </div>
 
         <div className="search-field">
-          <label htmlFor="search-maxprice">Max Stay Price ($)</label>
+          <label htmlFor="search-maxprice">Max Price ($)</label>
           <input
             id="search-maxprice"
             name="maxPrice"
@@ -188,10 +193,10 @@ export const RoomSearchForm = ({ onSearch, initialValues = {}, isLoading = false
           {isLoading ? (
             <span className="btn-loading-content">
               <span className="spinner-small" aria-hidden="true"></span>
-              <span>Searching Rooms...</span>
+              <span>Scanning Sanctuaries...</span>
             </span>
           ) : (
-            '🔍 Find Available Rooms'
+            ' Search Sanctuaries →'
           )}
         </button>
       </div>

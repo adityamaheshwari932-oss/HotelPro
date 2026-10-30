@@ -121,9 +121,10 @@ export const RoomsPage = () => {
   return (
     <div className="rooms-page-container">
       <div className="rooms-page-header">
-        <h1>Find Your Ideal Room</h1>
+        <span className="hero-badge-pill"> Sanctuaries Catalog</span>
+        <h1>Curated HotelPro Sanctuaries</h1>
         <p className="rooms-page-subtitle">
-          Real-time dynamic availability and date-specific transparent pricing directly from the hotel engine.
+          Engineered for serenity. Instant dynamic availability, transparent nightly breakdowns, and autonomous 15-minute reservation holds.
         </p>
       </div>
 

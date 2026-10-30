@@ -3,14 +3,13 @@ import { Link } from 'react-router-dom';
 import { formatRoomType } from '../utils/roomFormatters';
 
 /**
- * Reusable Room Card Component
+ * Apple-Grade Luxury Room Card Component
  *
- * SAFETY & DESIGN GUARANTEES:
- * 1. Image Fallback: Uses a clean inline SVG placeholder if no photos exist or if the image fails to load.
- * 2. Authoritative Pricing: Displays backend-calculated prices without frontend recomputations.
- *    Clearly separates total stay price from calculated nightly average.
- * 3. Transparent Nightly Breakdown: Allows expanding the backend-provided nightly breakdown when available.
- * 4. Preserves Stay Dates: Links to the detail page preserving stay query parameters for seamless booking progression.
+ * Visual & Functional Excellence:
+ * 1. Image Presentation: 16:10 aspect ratio with smooth hover scale and frosted glass status pills.
+ * 2. Authoritative Pricing: Transparently distinguishes stay total from average nightly rates.
+ * 3. Nightly Breakdown: Expandable drawer with date-by-date rule visibility.
+ * 4. Preservation of Query Parameters: Passes checkIn/checkOut and guests forward seamlessly.
  */
 export const RoomCard = ({ room, stay }) => {
   const [imageError, setImageError] = useState(false);
@@ -21,10 +20,10 @@ export const RoomCard = ({ room, stay }) => {
   const roomTypeLabel = formatRoomType(room.roomType);
   const primaryPhoto = !imageError && Array.isArray(room.photos) && room.photos.length > 0 ? room.photos[0] : null;
   const pricing = room.pricing;
-  const hotelName = room.hotel?.name || 'HotelPro Property';
-  const hotelAddress = room.hotel?.address || '';
+  const hotelName = room.hotel?.name || 'HotelPro Sanctuary';
+  const hotelAddress = room.hotel?.address || 'Cupertino, CA';
 
-  // Build detail URL with stay params if present
+  // Build detail URL preserving stay query parameters
   let detailUrl = `/rooms/${room._id}`;
   if (stay?.checkInDate && stay?.checkOutDate) {
     const params = new URLSearchParams({
@@ -39,6 +38,7 @@ export const RoomCard = ({ room, stay }) => {
 
   return (
     <article className="room-card" aria-labelledby={`room-title-${room._id}`}>
+      {/*  IMAGE CONTAINER WITH GLASS BADGES */}
       <div className="room-card-image-wrap">
         {primaryPhoto ? (
           <img
@@ -54,12 +54,18 @@ export const RoomCard = ({ room, stay }) => {
             <span className="fallback-text">{roomTypeLabel}</span>
           </div>
         )}
-        <span className="room-type-badge">{roomTypeLabel}</span>
+        <div className="room-card-badges-top">
+          <span className="room-type-badge">{roomTypeLabel}</span>
+          <span className="room-capacity-badge">
+            👤 Up to {room.capacity} {room.capacity === 1 ? 'Guest' : 'Guests'}
+          </span>
+        </div>
       </div>
 
+      {/*  CARD BODY */}
       <div className="room-card-body">
         <div className="room-card-header">
-          <div>
+          <div className="room-header-left">
             <h3 id={`room-title-${room._id}`} className="room-number-title">
               Room {room.roomNumber}
             </h3>
@@ -68,9 +74,10 @@ export const RoomCard = ({ room, stay }) => {
               {hotelAddress ? ` • ${hotelAddress}` : ''}
             </p>
           </div>
-          <span className="room-capacity-badge">
-            👤 Up to {room.capacity} {room.capacity === 1 ? 'Guest' : 'Guests'}
-          </span>
+          <div className="room-status-indicator" title="Available for selected dates">
+            <span className="status-dot-pulse"></span>
+            <span className="status-text-available">Available</span>
+          </div>
         </div>
 
         <p className="room-description">
@@ -81,7 +88,9 @@ export const RoomCard = ({ room, stay }) => {
         {pricing ? (
           <div className="room-pricing-box">
             <div className="pricing-main">
-              <span className="price-total-label">Total for {pricing.nights} {pricing.nights === 1 ? 'night' : 'nights'}</span>
+              <span className="price-total-label">
+                Total for {pricing.nights} {pricing.nights === 1 ? 'night' : 'nights'}
+              </span>
               <div className="price-total-amount">
                 <span className="currency-symbol">$</span>
                 <span className="total-value">{pricing.totalRoomPrice}</span>
@@ -127,15 +136,17 @@ export const RoomCard = ({ room, stay }) => {
         ) : (
           <div className="room-base-pricing">
             <span className="base-price-label">Base nightly rate</span>
-            <span className="base-price-amount">
-              ${room.basePrice} <span className="per-night-text">/ night</span>
-            </span>
+            <div className="base-price-wrap">
+              <span className="base-price-amount">${room.basePrice}</span>
+              <span className="per-night-text">/ night</span>
+            </div>
           </div>
         )}
 
         <div className="room-card-footer">
           <Link to={detailUrl} className="btn-view-details">
-            View Details & Availability →
+            <span>View Sanctuary &amp; Reserve</span>
+            <span className="btn-chevron">→</span>
           </Link>
         </div>
       </div>
