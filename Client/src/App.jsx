@@ -16,7 +16,7 @@ import BookingHoldPage from './pages/BookingHoldPage';
 import MyBookingsPage from './pages/MyBookingsPage';
 import BookingDetailPage from './pages/BookingDetailPage';
 import PaymentReceiptPage from './pages/PaymentReceiptPage';
-import AdminBookingsPage from './pages/AdminBookingsPage';
+import AdminHomePage from './pages/AdminHomePage';
 import NotFoundPage from './pages/NotFoundPage';
 
 export function App() {
@@ -84,10 +84,18 @@ export function App() {
 
             {/* Admin Routes */}
             <Route
+              path="admin"
+              element={
+                <AdminRoute>
+                  <AdminHomePage />
+                </AdminRoute>
+              }
+            />
+            <Route
               path="admin/bookings"
               element={
                 <AdminRoute>
-                  <AdminBookingsPage />
+                  <AdminHomePage initialTab="bookings" />
                 </AdminRoute>
               }
             />

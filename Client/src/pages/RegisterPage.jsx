@@ -11,9 +11,12 @@ export const RegisterPage = () => {
     name: '',
     email: '',
     password: '',
+    confirmPassword: '',
     phone: ''
   });
 
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [formErrors, setFormErrors] = useState({});
   const [apiError, setApiError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -31,6 +34,7 @@ export const RegisterPage = () => {
     const nameTrimmed = formData.name.trim();
     const emailTrimmed = formData.email.trim();
     const password = formData.password;
+    const confirmPassword = formData.confirmPassword;
 
     if (!nameTrimmed) {
       errors.name = 'Full name is required.';
@@ -61,6 +65,12 @@ export const RegisterPage = () => {
       }
     }
 
+    if (!confirmPassword) {
+      errors.confirmPassword = 'Confirm password is required.';
+    } else if (password !== confirmPassword) {
+      errors.confirmPassword = 'Passwords do not match.';
+    }
+
     setFormErrors(errors);
     return Object.keys(errors).length === 0;
   };
@@ -70,6 +80,10 @@ export const RegisterPage = () => {
     setFormData((prev) => ({ ...prev, [name]: value }));
     if (formErrors[name]) {
       setFormErrors((prev) => ({ ...prev, [name]: '' }));
+    }
+    // Also clear confirm password error if password changes
+    if (name === 'password' && formErrors.confirmPassword) {
+      setFormErrors((prev) => ({ ...prev, confirmPassword: '' }));
     }
     if (apiError) {
       setApiError('');
@@ -87,19 +101,26 @@ export const RegisterPage = () => {
     setIsSubmitting(true);
 
     try {
-      // Register with autoLogin=true so the customer is immediately authenticated
+      // Register with autoLogin=false so user is directed to Login page per requirements.
+      // confirmPassword is strictly client-side validation and never transmitted.
       await register({
         name: formData.name.trim(),
         email: formData.email.trim(),
         password: formData.password,
         phone: formData.phone.trim(),
-        autoLogin: true
+        autoLogin: false
       });
 
-      setSuccessMessage('Account created successfully! Redirecting...');
+      setSuccessMessage('Account created successfully! Redirecting to login...');
       setTimeout(() => {
-        navigate('/', { replace: true });
-      }, 800);
+        navigate('/login', {
+          replace: true,
+          state: {
+            message: 'Account created successfully! Please sign in with your credentials.',
+            registeredEmail: formData.email.trim()
+          }
+        });
+      }, 1000);
     } catch (err) {
       setIsSubmitting(false);
 
@@ -200,26 +221,71 @@ export const RegisterPage = () => {
 
           <div className="form-group">
             <label htmlFor="reg-password">Password</label>
-            <input
-              id="reg-password"
-              name="password"
-              type="password"
-              autoComplete="new-password"
-              required
-              disabled={isSubmitting}
-              value={formData.password}
-              onChange={handleChange}
-              placeholder="Create a strong password"
-              className={formErrors.password ? 'input-error' : ''}
-              aria-invalid={!!formErrors.password}
-              aria-describedby="reg-password-requirements reg-password-error"
-            />
+            <div className="password-input-wrapper">
+              <input
+                id="reg-password"
+                name="password"
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="new-password"
+                required
+                disabled={isSubmitting}
+                value={formData.password}
+                onChange={handleChange}
+                placeholder="Create a strong password"
+                className={formErrors.password ? 'input-error' : ''}
+                aria-invalid={!!formErrors.password}
+                aria-describedby="reg-password-requirements reg-password-error"
+              />
+              <button
+                type="button"
+                className="password-toggle-btn"
+                onClick={() => setShowPassword((prev) => !prev)}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                tabIndex={-1}
+              >
+                {showPassword ? '👁️' : '🙈'}
+              </button>
+            </div>
             <span id="reg-password-requirements" className="field-hint">
               Must be at least 8 characters with 1 uppercase, 1 lowercase, 1 number, and 1 special symbol.
             </span>
             {formErrors.password && (
               <span id="reg-password-error" className="field-error-message">
                 {formErrors.password}
+              </span>
+            )}
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="reg-confirm-password">Confirm Password</label>
+            <div className="password-input-wrapper">
+              <input
+                id="reg-confirm-password"
+                name="confirmPassword"
+                type={showConfirmPassword ? 'text' : 'password'}
+                autoComplete="new-password"
+                required
+                disabled={isSubmitting}
+                value={formData.confirmPassword}
+                onChange={handleChange}
+                placeholder="Re-enter your password"
+                className={formErrors.confirmPassword ? 'input-error' : ''}
+                aria-invalid={!!formErrors.confirmPassword}
+                aria-describedby={formErrors.confirmPassword ? 'reg-confirm-error' : undefined}
+              />
+              <button
+                type="button"
+                className="password-toggle-btn"
+                onClick={() => setShowConfirmPassword((prev) => !prev)}
+                aria-label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
+                tabIndex={-1}
+              >
+                {showConfirmPassword ? '👁️' : '🙈'}
+              </button>
+            </div>
+            {formErrors.confirmPassword && (
+              <span id="reg-confirm-error" className="field-error-message">
+                {formErrors.confirmPassword}
               </span>
             )}
           </div>

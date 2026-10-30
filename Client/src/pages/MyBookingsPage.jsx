@@ -258,6 +258,12 @@ export const MyBookingsPage = () => {
                       {formatCurrency(b.totalAmount, b.currency)}
                     </span>
                   </div>
+
+                  <div className="card-guest-contact" data-testid={`booking-phone-${b._id}`}>
+                    <span className="contact-icon" aria-hidden="true">📞</span>
+                    <span className="contact-label">Customer Phone:</span>
+                    <span className="contact-val font-mono">{b.guestInfo?.phone || 'Not provided'}</span>
+                  </div>
                 </div>
 
                 <div className="booking-card-footer">

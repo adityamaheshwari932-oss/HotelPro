@@ -342,6 +342,92 @@ const listRooms = async (query = {}, user = null) => {
 };
 
 /**
+ * Lists rooms for administrators across all operational statuses ('active', 'maintenance', 'inactive').
+ * Supports pagination, search by room number, and filters (hotel, roomType, status, capacity, minPrice, maxPrice).
+ *
+ * @param {object} query
+ * @returns {Promise<object>} { rooms, pagination }
+ */
+const listAdminRooms = async (query = {}) => {
+  const { page, limit, skip } = parsePagination(query);
+  const filter = {};
+
+  if (query.hotel) {
+    validateObjectId(query.hotel, 'hotel');
+    filter.hotel = query.hotel;
+  }
+
+  if (query.roomType) {
+    if (!VALID_ROOM_TYPES.includes(query.roomType)) {
+      throw new AppError('Invalid roomType filter. Allowed: single, double, suite', 400);
+    }
+    filter.roomType = query.roomType;
+  }
+
+  // If status is provided and not 'all', filter by it
+  if (query.status && query.status !== 'all') {
+    if (!VALID_ROOM_STATUSES.includes(query.status)) {
+      throw new AppError('Invalid status filter. Allowed: active, maintenance, inactive', 400);
+    }
+    filter.status = query.status;
+  }
+
+  if (query.search) {
+    const term = String(query.search).trim();
+    if (term.length > 50) {
+      throw new AppError('Search query cannot exceed 50 characters', 400);
+    }
+    if (term) {
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.roomNumber = { $regex: escaped, $options: 'i' };
+    }
+  }
+
+  if (query.capacity !== undefined) {
+    const minCap = parseInt(query.capacity, 10);
+    if (isNaN(minCap) || minCap < 1) {
+      throw new AppError('Capacity filter must be a positive integer', 400);
+    }
+    filter.capacity = { $gte: minCap };
+  }
+
+  if (query.minPrice !== undefined || query.maxPrice !== undefined) {
+    filter.basePrice = {};
+    if (query.minPrice !== undefined) {
+      const minP = parseFloat(query.minPrice);
+      if (isNaN(minP) || minP < 0) throw new AppError('minPrice must be a non-negative number', 400);
+      filter.basePrice.$gte = minP;
+    }
+    if (query.maxPrice !== undefined) {
+      const maxP = parseFloat(query.maxPrice);
+      if (isNaN(maxP) || maxP < 0) throw new AppError('maxPrice must be a non-negative number', 400);
+      filter.basePrice.$lte = maxP;
+    }
+  }
+
+  const [rooms, total] = await Promise.all([
+    Room.find(filter)
+      .select('-__v')
+      .skip(skip)
+      .limit(limit)
+      .populate('hotel', 'name address contact status')
+      .sort({ roomNumber: 1, createdAt: -1 })
+      .lean(),
+    Room.countDocuments(filter)
+  ]);
+
+  return {
+    rooms,
+    pagination: {
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit)
+    }
+  };
+};
+
+/**
  * Searches rooms available for a requested stay with dynamic availability and date-specific pricing.
  *
  * AVAILABILITY POLICY:
@@ -486,6 +572,7 @@ module.exports = {
   updateRoom,
   updateRoomStatus,
   listRooms,
+  listAdminRooms,
   searchAvailableRooms,
   calculateRoomPrice
 };

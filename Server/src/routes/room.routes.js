@@ -5,8 +5,12 @@ const { protect, restrictTo } = require('../middleware/auth.middleware');
 const router = express.Router();
 
 // Public routes
-// Note: '/search' must be defined before '/:id' to avoid routing conflicts
+// Note: '/search' and '/admin' must be defined before '/:id' to avoid routing conflicts
 router.get('/search', roomController.searchRooms);
+
+// Admin listing endpoint - must be before /:id
+router.get('/admin', protect, restrictTo('admin'), roomController.listAdminRooms);
+
 router.get('/', roomController.listRooms);
 router.get('/:id', roomController.getRoomById);
 

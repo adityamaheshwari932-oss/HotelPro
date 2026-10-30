@@ -9,12 +9,14 @@ export const LoginPage = () => {
   const location = useLocation();
 
   const [formData, setFormData] = useState({
-    email: '',
+    email: location.state?.registeredEmail || '',
     password: ''
   });
 
   const [formErrors, setFormErrors] = useState({});
   const [apiError, setApiError] = useState('');
+  const [successMessage, setSuccessMessage] = useState(location.state?.message || '');
+  const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Preserve complete return destination including query parameters
@@ -60,6 +62,9 @@ export const LoginPage = () => {
     if (apiError) {
       setApiError('');
     }
+    if (successMessage) {
+      setSuccessMessage('');
+    }
   };
 
   const handleSubmit = async (e) => {
@@ -98,6 +103,13 @@ export const LoginPage = () => {
           <p>Sign in to your HotelPro account to manage reservations</p>
         </div>
 
+        {successMessage && (
+          <div className="alert-success" role="status" aria-live="polite">
+            <span className="alert-icon">✓</span>
+            <span className="alert-message">{successMessage}</span>
+          </div>
+        )}
+
         {apiError && (
           <div className="alert-error" role="alert" aria-live="assertive">
             <span className="alert-icon">⚠️</span>
@@ -131,20 +143,31 @@ export const LoginPage = () => {
 
           <div className="form-group">
             <label htmlFor="login-password">Password</label>
-            <input
-              id="login-password"
-              name="password"
-              type="password"
-              autoComplete="current-password"
-              required
-              disabled={isSubmitting}
-              value={formData.password}
-              onChange={handleChange}
-              placeholder="Enter your password"
-              className={formErrors.password ? 'input-error' : ''}
-              aria-invalid={!!formErrors.password}
-              aria-describedby={formErrors.password ? 'login-password-error' : undefined}
-            />
+            <div className="password-input-wrapper">
+              <input
+                id="login-password"
+                name="password"
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="current-password"
+                required
+                disabled={isSubmitting}
+                value={formData.password}
+                onChange={handleChange}
+                placeholder="Enter your password"
+                className={formErrors.password ? 'input-error' : ''}
+                aria-invalid={!!formErrors.password}
+                aria-describedby={formErrors.password ? 'login-password-error' : undefined}
+              />
+              <button
+                type="button"
+                className="password-toggle-btn"
+                onClick={() => setShowPassword((prev) => !prev)}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                tabIndex={-1}
+              >
+                {showPassword ? '👁️' : '👁️‍🗨️'}
+              </button>
+            </div>
             {formErrors.password && (
               <span id="login-password-error" className="field-error-message">
                 {formErrors.password}

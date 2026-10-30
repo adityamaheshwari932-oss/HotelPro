@@ -204,7 +204,15 @@ export const RoomDetailPage = () => {
             {room.hotel?.contact && (
               <div className="detail-contact-section">
                 <h3>Hotel Contact</h3>
-                <p>Phone / Inquiries: {room.hotel.contact}</p>
+                {typeof room.hotel.contact === 'string' ? (
+                  <p>{room.hotel.contact}</p>
+                ) : (
+                  <>
+                    {room.hotel.contact.phone && <p><strong>Phone:</strong> {room.hotel.contact.phone}</p>}
+                    {room.hotel.contact.email && <p><strong>Email:</strong> {room.hotel.contact.email}</p>}
+                    {room.hotel.contact.website && <p><strong>Website:</strong> {room.hotel.contact.website}</p>}
+                  </>
+                )}
               </div>
             )}
           </div>

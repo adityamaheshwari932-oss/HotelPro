@@ -9,7 +9,7 @@ import {
 import { PaymentStatusBadge } from '../components/payment/PaymentStatusBadge';
 import { formatBookingReference } from '../utils/bookingUtils';
 
-export const AdminBookingsPage = () => {
+export const AdminBookingsPage = ({ embedded = false }) => {
   const [activeTab, setActiveTab] = useState('bookings'); // 'bookings' | 'reconciliation'
 
   // Bookings Tab State
@@ -141,15 +141,17 @@ export const AdminBookingsPage = () => {
   };
 
   return (
-    <div className="admin-page-container" data-testid="admin-bookings-page">
-      <div className="admin-page-header">
-        <div>
-          <h2>Booking & Payment Oversight</h2>
-          <p className="text-muted">
-            Administrative management for reservations, payment statuses, and reconciliation queues.
-          </p>
+    <div className={`admin-page-container ${embedded ? 'admin-page-embedded' : ''}`} data-testid="admin-bookings-page">
+      {!embedded && (
+        <div className="admin-page-header">
+          <div>
+            <h2>Booking & Payment Oversight</h2>
+            <p className="text-muted">
+              Administrative management for reservations, payment statuses, and reconciliation queues.
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Primary Tabs */}
       <div className="admin-tab-nav" role="tablist">

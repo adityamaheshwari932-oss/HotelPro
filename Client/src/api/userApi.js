@@ -39,7 +39,23 @@ export const updateProfile = async (payload, options = {}) => {
   return await apiClient.patch(resolveUrl('/auth/me', options), payload, options);
 };
 
+/**
+ * Retrieves registered users for administrative overview (Admin only).
+ * Calls GET /api/users
+ *
+ * @param {object} [params] - { page, limit, search, role, status }
+ * @param {object} [options]
+ * @returns {Promise<object>}
+ */
+export const getUsers = async (params = {}, options = {}) => {
+  return await apiClient.get(resolveUrl('/users', options), {
+    ...options,
+    params
+  });
+};
+
 export default {
   getProfile,
-  updateProfile
+  updateProfile,
+  getUsers
 };

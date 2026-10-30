@@ -108,6 +108,25 @@ const listRooms = async (req, res, next) => {
 };
 
 /**
+ * Lists rooms for administrators across all operational statuses (Admin only).
+ *
+ * Route: GET /api/rooms/admin
+ * Access: Protected (Admin)
+ */
+const listAdminRooms = async (req, res, next) => {
+  try {
+    const result = await roomService.listAdminRooms(req.query);
+
+    res.status(200).json({
+      success: true,
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
  * Searches rooms available for a requested stay with dynamic availability and pricing.
  *
  * Route: GET /api/rooms/search
@@ -132,5 +151,6 @@ module.exports = {
   updateRoom,
   updateRoomStatus,
   listRooms,
+  listAdminRooms,
   searchRooms
 };

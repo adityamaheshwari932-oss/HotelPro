@@ -74,12 +74,16 @@ const authRoutes = require('./src/routes/auth.routes');
 const roomRoutes = require('./src/routes/room.routes');
 const bookingRoutes = require('./src/routes/booking.routes');
 const paymentRoutes = require('./src/routes/payment.routes');
+const userRoutes = require('./src/routes/user.routes');
+const hotelRoutes = require('./src/routes/hotel.routes');
 const { notFoundHandler, errorHandler } = require('./src/middleware/error.middleware');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/rooms', roomRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/hotels', hotelRoutes);
 
 // 404 catch-all handler for unknown endpoints
 app.use(notFoundHandler);
